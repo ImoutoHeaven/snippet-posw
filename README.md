@@ -21,7 +21,7 @@ This project provides a self-contained L7 “front firewall” that:
 
 ## Configuration
 
-Edit `CONFIG` in `pow.js` to match your host/path patterns and enable PoW:
+Edit `CONFIG` in `pow.js` to match your host/path patterns and enable **PoW** and/or **Turnstile**:
 
 ```js
 const CONFIG = [
@@ -37,6 +37,37 @@ Notes:
   - `TURNSTILE_SECRET`
 - `pattern` matching is first-match-wins; put more specific rules first.
 - This snippet is intentionally **business-agnostic**: it does not rewrite paths and does not implement `?sign=` validation.
+
+### Turnstile
+
+Turnstile is implemented as a stateless gate:
+
+- Challenge page renders Turnstile with `cData = ticket.mac`.
+- The snippet calls Turnstile `siteverify` (1 subrequest) and enforces:
+  - `success === true`
+  - returned `cdata === ticket.mac` (binding)
+- On success, the snippet issues `__Host-turn_sol` (separate from `__Host-pow_sol`).
+
+Examples:
+
+```js
+// Turnstile only
+{ pattern: "example.com/**", config: {
+  POW_TOKEN: "replace-me",
+  turncheck: true,
+  TURNSTILE_SITEKEY: "0x4AAAAAA....",
+  TURNSTILE_SECRET: "0x4AAAAAA....",
+} },
+
+// PoW + Turnstile
+{ pattern: "example.com/**", config: {
+  POW_TOKEN: "replace-me",
+  powcheck: true,
+  turncheck: true,
+  TURNSTILE_SITEKEY: "0x4AAAAAA....",
+  TURNSTILE_SECRET: "0x4AAAAAA....",
+} },
+```
 
 ### bindPath (for proxy-style endpoints)
 

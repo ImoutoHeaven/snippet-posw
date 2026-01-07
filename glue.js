@@ -139,25 +139,60 @@ const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey) => {
   const el = ui.tsEl;
   if (el) el.innerHTML = "";
   log("Waiting for Turnstile...");
-  const token = await new Promise((resolve, reject) => {
-    const container = document.createElement("div");
-    if (el) el.appendChild(container);
+  const container = document.createElement("div");
+  if (el) el.appendChild(container);
+  let tokenResolve;
+  let tokenReject;
+  const nextToken = () =>
+    new Promise((resolve, reject) => {
+      tokenResolve = resolve;
+      tokenReject = reject;
+    });
+  let tokenPromise = nextToken();
+  let widgetId = null;
+  try {
+    widgetId = ts.render(container, {
+      sitekey,
+      theme: "dark",
+      cData: ticketMac,
+      callback: (t) => tokenResolve && tokenResolve(t),
+      "error-callback": () => tokenReject && tokenReject(new Error("Turnstile Failed")),
+      "expired-callback": () => tokenReject && tokenReject(new Error("Turnstile Expired")),
+    });
+  } catch (e) {
+    throw e;
+  }
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let token;
     try {
-      ts.render(container, {
-        sitekey,
-        theme: "dark",
-        cData: ticketMac,
-        callback: (t) => resolve(t),
-        "error-callback": () => reject(new Error("Turnstile Failed")),
-        "expired-callback": () => reject(new Error("Turnstile Expired")),
-      });
+      token = await tokenPromise;
     } catch (e) {
-      reject(e);
+      if (e && e.message === "Turnstile Expired") {
+        log("Turnstile expired. Retrying...");
+        tokenPromise = nextToken();
+        if (ts && typeof ts.reset === "function") ts.reset(widgetId);
+        continue;
+      }
+      throw e;
     }
-  });
-  log("Submitting Turnstile...");
-  await postJson(apiPrefix + "/turn", { ticketB64, pathHash, token });
-  log("Turnstile... done");
+    const submitLine = log("Submitting Turnstile...");
+    try {
+      await postJson(apiPrefix + "/turn", { ticketB64, pathHash, token });
+      update(submitLine, "Submitting Turnstile... done");
+      log("Turnstile... done");
+      return;
+    } catch (e) {
+      if (e && e.message === "403") {
+        update(submitLine, "Turnstile rejected. Please try again.");
+        if (attempt >= maxAttempts) throw new Error("Turnstile Rejected");
+        tokenPromise = nextToken();
+        if (ts && typeof ts.reset === "function") ts.reset(widgetId);
+        continue;
+      }
+      throw e;
+    }
+  }
 };
 
 const runPowFlow = async (
