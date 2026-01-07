@@ -40,6 +40,24 @@ If you have an endpoint whose *effective* target path is carried in a parameter/
 
 When enabled, missing/invalid bindPath input returns `400`.
 
+### Sliding renewal (managed-challenge-like)
+
+To keep users passing the gate while they stay active (without redirects), enable sliding renewal for `__Host-pow_sol`.
+
+When the client presents a valid cookie that is close to expiry, the snippet re-issues it with a new expiry and an incremented, **signed** renewal counter.
+
+Config keys:
+
+- `POW_SOL_SLIDING: true`
+- `POW_SOL_RENEW_MAX`: max renew count (hard cap; cannot be bypassed by the client)
+- `POW_SOL_RENEW_WINDOW_SEC`: only renew when `exp - now <= window` to avoid setting cookies on every request
+
+Cookie format (v3):
+
+- `v3.{ticketB64}.{iat}.{exp}.{n}.{mac}`
+
+`iat` stays constant across renewals, and the total lifetime is capped to at most `POW_SOL_TTL_SEC * (POW_SOL_RENEW_MAX + 1)` since `iat`.
+
 ## Build
 
 ```bash
