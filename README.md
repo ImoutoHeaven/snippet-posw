@@ -51,12 +51,13 @@ Config keys:
 - `POW_SOL_SLIDING: true`
 - `POW_SOL_RENEW_MAX`: max renew count (hard cap; cannot be bypassed by the client)
 - `POW_SOL_RENEW_WINDOW_SEC`: only renew when `exp - now <= window` to avoid setting cookies on every request
+- `POW_SOL_RENEW_MIN_SEC`: minimum time since last renewal; default `POW_TICKET_TTL_SEC - 180` (clamped)
 
-Cookie format (v3):
+Cookie format (v4):
 
-- `v3.{ticketB64}.{iat}.{exp}.{n}.{mac}`
+- `v4.{ticketB64}.{iat}.{last}.{n}.{mac}`
 
-`iat` stays constant across renewals, and the total lifetime is capped to at most `POW_SOL_TTL_SEC * (POW_SOL_RENEW_MAX + 1)` since `iat`.
+`iat` stays constant across renewals, `last` tracks the last renewal timestamp, and the total lifetime is capped to at most `POW_SOL_TTL_SEC * (POW_SOL_RENEW_MAX + 1)` since `iat`.
 
 ## Build
 
