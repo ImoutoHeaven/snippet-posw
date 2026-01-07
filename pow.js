@@ -3,6 +3,7 @@
 
 const DEFAULTS = {
   powcheck: false,
+  turncheck: false,
   bindPathMode: "none",
   bindPathQueryName: "path",
   bindPathHeaderName: "",
@@ -125,6 +126,8 @@ const compileConfigEntry = (entry) => {
 
 const COMPILED_CONFIG = CONFIG.map(compileConfigEntry);
 const POW_API_PREFIX = DEFAULTS.POW_API_PREFIX;
+const TURN_SOL_COOKIE = "__Host-turn_sol";
+const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const pickConfigWithId = (hostname, path) => {
   const host = typeof hostname === "string" ? hostname.toLowerCase() : "";
@@ -724,8 +727,10 @@ const makePowCommitMac = async (
     `commit|${ticketB64}|${rootB64}|${pathHash}|${nonce}|${exp}|${spineSeed}`
   );
 
-const makePowSolMacV4 = async (powSecret, ticketB64, iat, last, n) =>
-  hmacSha256Base64UrlNoPad(powSecret, `sol-v4|${ticketB64}|${iat}|${last}|${n}`);
+const SOL_TAG_POW = "sol-v4";
+const SOL_TAG_TURN = "turn-v4";
+const makeSolMacV4 = async (powSecret, tag, ticketB64, iat, last, n) =>
+  hmacSha256Base64UrlNoPad(powSecret, `${tag}|${ticketB64}|${iat}|${last}|${n}`);
 
 const makePowStateToken = async (
   powSecret,
@@ -954,9 +959,19 @@ const getPowBindingValues = async (request, canonicalPath, config) => {
   return getPowBindingValuesWithPathHash(request, pathHash, config);
 };
 
-const verifyPowSol = async (request, url, canonicalPath, nowSeconds, config, powSecret, cfgId) => {
+const verifySol = async (
+  request,
+  url,
+  canonicalPath,
+  nowSeconds,
+  config,
+  powSecret,
+  cfgId,
+  cookieName,
+  solTag
+) => {
   const cookies = parseCookieHeader(request.headers.get("Cookie"));
-  const solRaw = cookies.get(DEFAULTS.POW_SOL_COOKIE) || "";
+  const solRaw = cookies.get(cookieName) || "";
   const sol = parsePowSolCookie(solRaw);
   if (!sol) return null;
   const ticket = parsePowTicket(sol.ticketB64);
@@ -986,21 +1001,26 @@ const verifyPowSol = async (request, url, canonicalPath, nowSeconds, config, pow
   );
   const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
   if (!timingSafeEqual(expectedMac, ticket.mac)) return null;
-  const expectedSolMac = await makePowSolMacV4(
-    powSecret,
-    sol.ticketB64,
-    sol.iat,
-    sol.last,
-    sol.n
-  );
+  const expectedSolMac = await makeSolMacV4(powSecret, solTag, sol.ticketB64, sol.iat, sol.last, sol.n);
   if (!timingSafeEqual(expectedSolMac, sol.mac)) return null;
   return { sol, ticket, bindingValues };
 };
 
-const maybeRenewPowSol = async (request, url, nowSeconds, config, powSecret, cfgId, powMeta, response) => {
-  if (!powMeta || !powMeta.sol || !powMeta.bindingValues || !response) return response;
+const maybeRenewSol = async (
+  request,
+  url,
+  nowSeconds,
+  config,
+  powSecret,
+  cfgId,
+  meta,
+  response,
+  cookieName,
+  solTag
+) => {
+  if (!meta || !meta.sol || !meta.bindingValues || !response) return response;
   if (config.POW_SOL_SLIDING !== true) return response;
-  const sol = powMeta.sol;
+  const sol = meta.sol;
   if (sol.v !== 4) return response;
 
   const renewMax = Math.max(
@@ -1019,7 +1039,7 @@ const maybeRenewPowSol = async (request, url, nowSeconds, config, powSecret, cfg
       normalizeNumber(config.POW_SOL_RENEW_WINDOW_SEC, DEFAULTS.POW_SOL_RENEW_WINDOW_SEC)
     )
   );
-  const curExp = powMeta.ticket && Number.isFinite(powMeta.ticket.e) ? powMeta.ticket.e : 0;
+  const curExp = meta.ticket && Number.isFinite(meta.ticket.e) ? meta.ticket.e : 0;
   if (!Number.isFinite(curExp) || curExp <= 0) return response;
   if (curExp - nowSeconds > window) return response;
 
@@ -1046,8 +1066,8 @@ const maybeRenewPowSol = async (request, url, nowSeconds, config, powSecret, cfg
   if (!Number.isFinite(newExp) || newExp <= nowSeconds || newExp <= curExp) return response;
 
   const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
-  const steps = powMeta.ticket && Number.isFinite(powMeta.ticket.L) && powMeta.ticket.L > 0
-    ? powMeta.ticket.L
+  const steps = meta.ticket && Number.isFinite(meta.ticket.L) && meta.ticket.L > 0
+    ? meta.ticket.L
     : getPowSteps(config);
   const ticket = {
     v: powVersion,
@@ -1057,7 +1077,7 @@ const maybeRenewPowSol = async (request, url, nowSeconds, config, powSecret, cfg
     cfgId,
     mac: "",
   };
-  const b = powMeta.bindingValues;
+  const b = meta.bindingValues;
   const bindingString = makePowBindingString(
     ticket,
     url.hostname,
@@ -1071,11 +1091,11 @@ const maybeRenewPowSol = async (request, url, nowSeconds, config, powSecret, cfg
   const ticketB64 = encodePowTicket(ticket);
 
   const nextN = sol.n + 1;
-  const mac = await makePowSolMacV4(powSecret, ticketB64, sol.iat, nowSeconds, nextN);
+  const mac = await makeSolMacV4(powSecret, solTag, ticketB64, sol.iat, nowSeconds, nextN);
   const solValue = `v4.${ticketB64}.${sol.iat}.${nowSeconds}.${nextN}.${mac}`;
 
   const headers = new Headers(response.headers);
-  setCookie(headers, DEFAULTS.POW_SOL_COOKIE, solValue, newExp - nowSeconds);
+  setCookie(headers, cookieName, solValue, newExp - nowSeconds);
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
@@ -1093,6 +1113,7 @@ const buildPowChallengeHtml = ({
   reloadUrlB64,
   apiPrefixB64,
   esmUrlB64,
+  turnSiteKeyB64,
   glueUrl,
 }) => __HTML_TEMPLATE__
   .replace('__BINDING_STRING_B64__', bindingStringB64)
@@ -1104,7 +1125,8 @@ const buildPowChallengeHtml = ({
   .replace('__GLUE_URL__', glueUrl)
   .replace('__RELOAD_URL_B64__', reloadUrlB64)
   .replace('__API_PREFIX_B64__', apiPrefixB64)
-  .replace('__ESM_URL_B64__', esmUrlB64);
+  .replace('__ESM_URL_B64__', esmUrlB64)
+  .replace('__TURN_SITEKEY_B64__', turnSiteKeyB64);
 
 const respondPowChallengeHtml = async (
   request,
@@ -1113,24 +1135,29 @@ const respondPowChallengeHtml = async (
   nowSeconds,
   config,
   powSecret,
-  cfgId
+  cfgId,
+  requirements
 ) => {
   const ticketTtl = normalizeNumber(
     config.POW_TICKET_TTL_SEC,
     DEFAULTS.POW_TICKET_TTL_SEC
   ) || 0;
   const exp = nowSeconds + Math.max(1, ticketTtl);
-  const steps = getPowSteps(config);
-  const hashcashBits = Math.max(
-    0,
-    Math.floor(
-      normalizeNumber(config.POW_HASHCASH_BITS, DEFAULTS.POW_HASHCASH_BITS)
-    )
-  );
-  const segSpec = parseSegmentLenSpec(
-    config.POW_SEGMENT_LEN,
-    DEFAULTS.POW_SEGMENT_LEN
-  );
+  const needPow = requirements && requirements.needPow === true;
+  const needTurn = requirements && requirements.needTurn === true;
+  const steps = needPow ? getPowSteps(config) : 1;
+  const glueSteps = needPow ? steps : 0;
+  const hashcashBits = needPow
+    ? Math.max(
+        0,
+        Math.floor(
+          normalizeNumber(config.POW_HASHCASH_BITS, DEFAULTS.POW_HASHCASH_BITS)
+        )
+      )
+    : 0;
+  const segSpec = needPow
+    ? parseSegmentLenSpec(config.POW_SEGMENT_LEN, DEFAULTS.POW_SEGMENT_LEN)
+    : { mode: "fixed", fixed: 1 };
   const bindingValues = await getPowBindingValues(request, canonicalPath, config);
   if (!bindingValues) return deny();
   const { pathHash, ipScope, country, asn, tlsFingerprint } = bindingValues;
@@ -1157,7 +1184,12 @@ const respondPowChallengeHtml = async (
   const bindingStringB64 = base64UrlEncodeNoPad(utf8ToBytes(bindingString));
   const reloadUrlB64 = base64UrlEncodeNoPad(utf8ToBytes(url.toString()));
   const apiPrefixB64 = base64UrlEncodeNoPad(utf8ToBytes(POW_API_PREFIX));
-  const esmUrlB64 = base64UrlEncodeNoPad(utf8ToBytes(String(config.POW_ESM_URL)));
+  const esmUrlB64 = needPow
+    ? base64UrlEncodeNoPad(utf8ToBytes(String(config.POW_ESM_URL)))
+    : "";
+  const turnSiteKeyB64 = needTurn
+    ? base64UrlEncodeNoPad(utf8ToBytes(String(config.TURNSTILE_SITEKEY)))
+    : "";
   const glueUrl = typeof config.POW_GLUE_URL === "string" ? config.POW_GLUE_URL : "";
   const segmentLenFixed = Math.max(
     1,
@@ -1168,7 +1200,7 @@ const respondPowChallengeHtml = async (
   );
   const html = buildPowChallengeHtml({
     bindingStringB64,
-    steps,
+    steps: glueSteps,
     ticketB64,
     pathHash,
     hashcashBits,
@@ -1177,6 +1209,7 @@ const respondPowChallengeHtml = async (
     reloadUrlB64,
     apiPrefixB64,
     esmUrlB64,
+    turnSiteKeyB64,
   });
   const headers = new Headers();
   headers.set("Content-Type", "text/html");
@@ -1431,6 +1464,108 @@ const handlePowCommit = async (request, url, nowSeconds) => {
   const value = `v3.${ticketB64}.${rootB64}.${bindingValues.pathHash}.${nonce}.${exp}.${spineSeed}.${mac}`;
   const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_COMMIT_COOKIE, value, ttl);
+  return new Response(null, { status: 200, headers });
+};
+
+const handleTurn = async (request, url, nowSeconds) => {
+  const body = await readJsonBody(request);
+  if (!body || typeof body !== "object") return S(400);
+  const ticketB64 = typeof body.ticketB64 === "string" ? body.ticketB64 : "";
+  const pathHash = typeof body.pathHash === "string" ? body.pathHash : "";
+  const token = typeof body.token === "string" ? body.token : "";
+  if (!ticketB64 || !token) return S(400);
+  if (!isBase64Url(ticketB64, 1, B64_TICKET_MAX_LEN) || pathHash.length > B64_HASH_MAX_LEN) {
+    return S(400);
+  }
+
+  const ticket = parsePowTicket(ticketB64);
+  if (!ticket) return deny();
+  const baseConfig = getConfigById(ticket.cfgId);
+  if (!baseConfig) return deny();
+  const config = { ...DEFAULTS, ...baseConfig };
+  const powSecret = getPowSecret(config);
+  if (!powSecret) return S(500);
+  if (config.turncheck !== true) return S(404);
+  const turnSecret = typeof config.TURNSTILE_SECRET === "string" ? config.TURNSTILE_SECRET : "";
+  if (!turnSecret) return S(500);
+
+  const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
+  if (ticket.v !== powVersion) return deny();
+  if (isExpired(ticket.e, nowSeconds)) return deny();
+
+  const bindPath = config.POW_BIND_PATH !== false;
+  if (bindPath && !isBase64Url(pathHash, 1, B64_HASH_MAX_LEN)) {
+    return S(400);
+  }
+  const normalizedPathHash = bindPath ? pathHash : "any";
+  if (bindPath && !normalizedPathHash) return S(400);
+
+  const bindingValues = await getPowBindingValuesWithPathHash(request, normalizedPathHash, config);
+  if (!bindingValues) return deny();
+  const bindingString = makePowBindingString(
+    ticket,
+    url.hostname,
+    bindingValues.pathHash,
+    bindingValues.ipScope,
+    bindingValues.country,
+    bindingValues.asn,
+    bindingValues.tlsFingerprint
+  );
+  const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
+  if (!timingSafeEqual(expectedMac, ticket.mac)) return deny();
+
+  const form = new URLSearchParams();
+  form.set("secret", turnSecret);
+  form.set("response", token);
+  let verifyRes;
+  try {
+    verifyRes = await fetch(TURNSTILE_SITEVERIFY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+  } catch {
+    return deny();
+  }
+  let verify;
+  try {
+    verify = await verifyRes.json();
+  } catch {
+    verify = null;
+  }
+  if (!verify || verify.success !== true) return deny();
+  const cdata = typeof verify.cdata === "string" ? verify.cdata : "";
+  if (cdata !== ticket.mac) return deny();
+
+  const solTtl = normalizeNumber(config.POW_SOL_TTL_SEC, DEFAULTS.POW_SOL_TTL_SEC) || 0;
+  const remaining = ticket.e - nowSeconds;
+  const ttl = Math.max(1, Math.min(solTtl, remaining));
+  if (!Number.isFinite(ttl) || ttl <= 0) return deny();
+  const exp = nowSeconds + ttl;
+  const solTicket = {
+    v: powVersion,
+    e: exp,
+    L: ticket.L,
+    r: randomBase64Url(16),
+    cfgId: ticket.cfgId,
+    mac: "",
+  };
+  const solBindingString = makePowBindingString(
+    solTicket,
+    url.hostname,
+    bindingValues.pathHash,
+    bindingValues.ipScope,
+    bindingValues.country,
+    bindingValues.asn,
+    bindingValues.tlsFingerprint
+  );
+  solTicket.mac = await hmacSha256Base64UrlNoPad(powSecret, solBindingString);
+  const solTicketB64 = encodePowTicket(solTicket);
+  const iat = nowSeconds;
+  const solMac = await makeSolMacV4(powSecret, SOL_TAG_TURN, solTicketB64, iat, iat, 0);
+  const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
+  const headers = new Headers();
+  setCookie(headers, TURN_SOL_COOKIE, solValue, ttl);
   return new Response(null, { status: 200, headers });
 };
 
@@ -1925,7 +2060,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   solTicket.mac = await hmacSha256Base64UrlNoPad(powSecret, solBindingString);
   const solTicketB64 = encodePowTicket(solTicket);
   const iat = nowSeconds;
-  const solMac = await makePowSolMacV4(powSecret, solTicketB64, iat, iat, 0);
+  const solMac = await makeSolMacV4(powSecret, SOL_TAG_POW, solTicketB64, iat, iat, 0);
   const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
   const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_SOL_COOKIE, solValue, ttl);
@@ -1950,6 +2085,9 @@ const handlePowApi = async (request, url, nowSeconds) => {
   }
   if (action === "/open") {
     return handlePowOpen(request, url, nowSeconds);
+  }
+  if (action === "/turn") {
+    return handleTurn(request, url, nowSeconds);
   }
   return S(404);
 };
@@ -1976,7 +2114,9 @@ export default {
     if (!config) return S(500);
     const cfgId = selected.cfgId;
 
-    if (config.powcheck !== true) {
+    const needPow = config.powcheck === true;
+    const needTurn = config.turncheck === true;
+    if (!needPow && !needTurn) {
       return fetch(request);
     }
 
@@ -1989,20 +2129,44 @@ export default {
 
     const powSecret = getPowSecret(config);
     if (!powSecret) return S(500);
-    if (!config.POW_ESM_URL) return S(500);
+    if (needPow && !config.POW_ESM_URL) return S(500);
+    if (needTurn) {
+      const sitekey =
+        typeof config.TURNSTILE_SITEKEY === "string" ? config.TURNSTILE_SITEKEY : "";
+      const secret =
+        typeof config.TURNSTILE_SECRET === "string" ? config.TURNSTILE_SECRET : "";
+      if (!sitekey || !secret) return S(500);
+    }
 
-    const powMeta = await verifyPowSol(
-      request,
-      url,
-      bindRes.canonicalPath,
-      nowSeconds,
-      config,
-      powSecret,
-      cfgId
-    );
-    if (powMeta) {
-      const response = await fetch(bindRes.forwardRequest);
-      return maybeRenewPowSol(
+    const powMeta = needPow
+      ? await verifySol(
+          request,
+          url,
+          bindRes.canonicalPath,
+          nowSeconds,
+          config,
+          powSecret,
+          cfgId,
+          DEFAULTS.POW_SOL_COOKIE,
+          SOL_TAG_POW
+        )
+      : null;
+    const turnMeta = needTurn
+      ? await verifySol(
+          request,
+          url,
+          bindRes.canonicalPath,
+          nowSeconds,
+          config,
+          powSecret,
+          cfgId,
+          TURN_SOL_COOKIE,
+          SOL_TAG_TURN
+        )
+      : null;
+    if ((!needPow || powMeta) && (!needTurn || turnMeta)) {
+      let response = await fetch(bindRes.forwardRequest);
+      response = await maybeRenewSol(
         request,
         url,
         nowSeconds,
@@ -2010,12 +2174,28 @@ export default {
         powSecret,
         cfgId,
         powMeta,
-        response
+        response,
+        DEFAULTS.POW_SOL_COOKIE,
+        SOL_TAG_POW
       );
+      response = await maybeRenewSol(
+        request,
+        url,
+        nowSeconds,
+        config,
+        powSecret,
+        cfgId,
+        turnMeta,
+        response,
+        TURN_SOL_COOKIE,
+        SOL_TAG_TURN
+      );
+      return response;
     }
 
     if (!isNavigationRequest(request)) {
-      return J({ code: "pow_required" }, 403);
+      const code = needPow && !powMeta ? "pow_required" : "turn_required";
+      return J({ code }, 403);
     }
 
     return respondPowChallengeHtml(
@@ -2025,7 +2205,8 @@ export default {
       nowSeconds,
       config,
       powSecret,
-      cfgId
+      cfgId,
+      { needPow: needPow && !powMeta, needTurn: needTurn && !turnMeta }
     );
   },
 };

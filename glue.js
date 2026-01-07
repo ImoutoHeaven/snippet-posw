@@ -52,14 +52,17 @@ const initUi = () => {
     ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 0 0 1px rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;}",
     "h1{margin:0 0 24px;font-size:15px;font-weight:500;color:var(--accent);letter-spacing:-0.01em;}",
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
+    "#ts{margin-top:16px;display:flex;justify-content:center;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}"
   ].join("");
   (document.head || document.documentElement).appendChild(style);
-  document.body.innerHTML = '<div class="card"><h1 id="t">Verifying...</h1><div id="log"></div></div>';
+  document.body.innerHTML =
+    '<div class="card"><h1 id="t">Verifying...</h1><div id="log"></div><div id="ts"></div></div>';
   return {
     logEl: document.getElementById("log"),
-    tEl: document.getElementById("t")
+    tEl: document.getElementById("t"),
+    tsEl: document.getElementById("ts"),
   };
 };
 
@@ -101,37 +104,92 @@ const setStatus = (ok) => {
 
 log("Initializing...");
 
-export default async function runPow(
+const getTicketMac = (ticketB64) => {
+  const raw = decodeB64Url(String(ticketB64 || ""));
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 6) return null;
+  return parts[5] || null;
+};
+
+let turnstilePromise;
+const loadTurnstile = () => {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstilePromise) return turnstilePromise;
+  turnstilePromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve(window.turnstile);
+    script.onerror = () => reject(new Error("Turnstile Load Failed"));
+    (document.head || document.documentElement).appendChild(script);
+  });
+  return turnstilePromise;
+};
+
+const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey) => {
+  const ticketMac = getTicketMac(ticketB64);
+  if (!ticketMac) throw new Error("Bad Ticket");
+  log("Loading Turnstile...");
+  const ts = await loadTurnstile();
+  if (!ts || typeof ts.render !== "function") {
+    throw new Error("Turnstile Missing");
+  }
+  const el = ui.tsEl;
+  if (el) el.innerHTML = "";
+  log("Waiting for Turnstile...");
+  const token = await new Promise((resolve, reject) => {
+    const container = document.createElement("div");
+    if (el) el.appendChild(container);
+    try {
+      ts.render(container, {
+        sitekey,
+        theme: "dark",
+        cData: ticketMac,
+        callback: (t) => resolve(t),
+        "error-callback": () => reject(new Error("Turnstile Failed")),
+        "expired-callback": () => reject(new Error("Turnstile Expired")),
+      });
+    } catch (e) {
+      reject(e);
+    }
+  });
+  log("Submitting Turnstile...");
+  await postJson(apiPrefix + "/turn", { ticketB64, pathHash, token });
+  log("Turnstile... done");
+};
+
+const runPowFlow = async (
+  apiPrefix,
   bindingB64,
   steps,
   ticketB64,
   pathHash,
   hashcashBits,
   segmentLen,
-  reloadUrlB64,
-  apiPrefixB64,
   esmUrlB64
-) {
-  try {
-    log("Loading solver...");
-    const esmUrl = decodeB64Url(String(esmUrlB64 || ""));
-    const module = await import(esmUrl);
-    const computePoswCommit = module.computePoswCommit;
-    if (typeof computePoswCommit !== "function") {
-      throw new Error("Solver Missing");
+) => {
+  log("Loading solver...");
+  const esmUrl = decodeB64Url(String(esmUrlB64 || ""));
+  const module = await import(esmUrl);
+  const computePoswCommit = module.computePoswCommit;
+  if (typeof computePoswCommit !== "function") {
+    throw new Error("Solver Missing");
+  }
+  const binding = decodeB64Url(String(bindingB64 || ""));
+  const spinIndex = log("Computing hash chain...");
+  const spinChars = "|/-\\";
+  let spinFrame = 0;
+  let attemptCount = 0;
+  const spinTimer = setInterval(() => {
+    let msg = "Computing hash chain...";
+    if (attemptCount > 0) {
+      msg = "Screening hash (attempt " + attemptCount + ")...";
     }
-    const binding = decodeB64Url(String(bindingB64 || ""));
-    const spinIndex = log("Computing hash chain...");
-    const spinChars = "|/-\\";
-    let spinFrame = 0;
-    let attemptCount = 0;
-    const spinTimer = setInterval(() => {
-      let msg = "Computing hash chain...";
-      if (attemptCount > 0) {
-        msg = "Screening hash (attempt " + attemptCount + ")...";
-      }
-      update(spinIndex, msg + " " + spinChars[spinFrame++ % spinChars.length]);
-    }, 120);
+    update(spinIndex, msg + " " + spinChars[spinFrame++ % spinChars.length]);
+  }, 120);
+  try {
     const commit = await computePoswCommit(binding, steps, {
       hashcashBits,
       segmentLen,
@@ -140,8 +198,10 @@ export default async function runPow(
       },
     });
     clearInterval(spinTimer);
-    update(spinIndex, (attemptCount > 0 ? "Screening hash... done" : "Computing hash chain... done"));
-    const apiPrefix = normalizeApiPrefix(decodeB64Url(String(apiPrefixB64 || "")));
+    update(
+      spinIndex,
+      attemptCount > 0 ? "Screening hash... done" : "Computing hash chain... done"
+    );
     log("Submitting commit...");
     await postJson(apiPrefix + "/commit", {
       ticketB64,
@@ -196,10 +256,56 @@ export default async function runPow(
         throw new Error("Challenge Failed");
       }
     }
+    log("PoW... done");
+  } finally {
+    clearInterval(spinTimer);
+  }
+};
+
+export default async function runPow(
+  bindingB64,
+  steps,
+  ticketB64,
+  pathHash,
+  hashcashBits,
+  segmentLen,
+  reloadUrlB64,
+  apiPrefixB64,
+  esmUrlB64,
+  turnSiteKeyB64
+) {
+  try {
+    const apiPrefix = normalizeApiPrefix(decodeB64Url(String(apiPrefixB64 || "")));
+    const target = decodeB64Url(String(reloadUrlB64 || "")) || "/";
+
+    const needPow = Number(steps) > 0;
+    const turnSiteKey = decodeB64Url(String(turnSiteKeyB64 || "")) || "";
+    const needTurn = !!turnSiteKey;
+
+    const tasks = [];
+    if (needPow) {
+      tasks.push(
+        runPowFlow(
+          apiPrefix,
+          bindingB64,
+          steps,
+          ticketB64,
+          pathHash,
+          hashcashBits,
+          segmentLen,
+          esmUrlB64
+        )
+      );
+    }
+    if (needTurn) {
+      tasks.push(runTurnstile(apiPrefix, ticketB64, pathHash, turnSiteKey));
+    }
+    if (!tasks.length) throw new Error("No Challenge");
+
+    await Promise.all(tasks);
     log("Access granted. Redirecting...");
     setStatus(true);
     document.title = "Redirecting";
-    const target = decodeB64Url(String(reloadUrlB64 || ""));
     window.location.replace(target);
   } catch (e) {
     if (e && e.message === "403") {

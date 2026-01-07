@@ -1,11 +1,15 @@
 # snippet-posw
 
-Stateless Proof-of-Work (PoW) gate for Cloudflare **Snippets / Workers**.
+Stateless PoW / Turnstile gate for Cloudflare **Snippets / Workers**.
 
 This project provides a self-contained L7 “front firewall” that:
 
 - Exposes a PoW API under `/{POW_API_PREFIX}/*` (default: `/__pow/*`).
-- Gates matched requests: if the client does not have a valid `__Host-pow_sol` cookie, it serves an HTML challenge page (navigation) or returns `403 { code: "pow_required" }` (non-navigation).
+- Optionally verifies Turnstile under `/{POW_API_PREFIX}/turn`.
+- Gates matched requests:
+  - `powcheck: true` → requires `__Host-pow_sol`
+  - `turncheck: true` → requires `__Host-turn_sol`
+  - both enabled → requires both
 - Stays **stateless** on the server side (no KV/DO/DB): everything is derived/verified with HMAC and short-lived cookies.
 
 ## Files
@@ -28,6 +32,9 @@ const CONFIG = [
 Notes:
 
 - `POW_TOKEN` is required when `powcheck: true` (this snippet does not fall back to any other secret).
+- When `turncheck: true`, you must also set:
+  - `TURNSTILE_SITEKEY`
+  - `TURNSTILE_SECRET`
 - `pattern` matching is first-match-wins; put more specific rules first.
 - This snippet is intentionally **business-agnostic**: it does not rewrite paths and does not implement `?sign=` validation.
 
