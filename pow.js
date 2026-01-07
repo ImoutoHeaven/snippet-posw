@@ -1517,6 +1517,8 @@ const handleTurn = async (request, url, nowSeconds) => {
   const form = new URLSearchParams();
   form.set("secret", turnSecret);
   form.set("response", token);
+  const remoteip = getClientIP(request);
+  if (remoteip && remoteip !== "0.0.0.0") form.set("remoteip", remoteip);
   let verifyRes;
   try {
     verifyRes = await fetch(TURNSTILE_SITEVERIFY_URL, {
