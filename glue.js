@@ -137,7 +137,10 @@ const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey) => {
     throw new Error("Turnstile Missing");
   }
   const el = ui.tsEl;
-  if (el) el.innerHTML = "";
+  if (el) {
+    el.hidden = false;
+    el.innerHTML = "";
+  }
   log("Waiting for Turnstile...");
   const container = document.createElement("div");
   if (el) el.appendChild(container);
@@ -181,6 +184,15 @@ const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey) => {
       await postJson(apiPrefix + "/turn", { ticketB64, pathHash, token });
       update(submitLine, "Submitting Turnstile... done");
       log("Turnstile... done");
+      if (el) {
+        el.hidden = true;
+        el.innerHTML = "";
+      }
+      if (ts && typeof ts.remove === "function" && widgetId !== null) {
+        try {
+          ts.remove(widgetId);
+        } catch {}
+      }
       return;
     } catch (e) {
       if (e && e.message === "403") {
