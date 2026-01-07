@@ -168,3 +168,101 @@ Output: `dist/pow_snippet.js` (checks the Cloudflare Snippet 32KB limit).
 1. Build and copy `dist/pow_snippet.js` into Cloudflare **Snippets** (or deploy as a Worker).
 2. Ensure it runs **before** any downstream auth/business snippets (if you use multiple snippets).
 3. Keep `/__pow/*` reachable from browsers during the challenge flow.
+
+---
+
+## Design Notes (Legacy, still applies)
+
+The original implementation lived in a larger “combined” snippet, but the PoW protocol and its design rationale are unchanged.
+
+### Goals
+
+- **Stateless**: no KV / DO / DB; everything is derived and verified with HMAC and short-lived cookies.
+- **Priced access**: passing the gate mints a verifiable token (cookie), which can be treated as a “quota currency”.
+- **Physical throughput ceiling**: the protocol enforces multi-round **serial** network round-trips (“RTT-lock”), so even extreme compute cannot bypass the latency bottleneck.
+
+### High-level flow
+
+1. Match a rule from `CONFIG` (first match wins) and merge with defaults.
+2. If `powcheck` and/or `turncheck` is enabled and the request is missing required cookie(s):
+   - Navigation/HTML requests get an HTML challenge page.
+   - Non-navigation requests get `403` with a short `{ code }`.
+3. PoW uses a stateless CCR API: `POST /__pow/commit` → `POST /__pow/challenge` → multiple `POST /__pow/open`.
+4. On success, the snippet issues `__Host-pow_sol` (and/or `__Host-turn_sol`) as the access ticket.
+
+### CCR: Commit → Challenge → Response/Open
+
+PoW is implemented as a “CCR” handshake (commit first, then the server samples, then the client opens proofs):
+
+1. **Commit**: the browser computes the PoSW commitment (`rootB64 + nonce`) and calls `POST /__pow/commit`.
+   - The snippet verifies the ticket binding and mints a short-lived `__Host-pow_commit` cookie (contains `ticketB64/rootB64/pathHash/nonce/exp/spineSeed/mac`).
+2. **Challenge**: the browser calls `POST /__pow/challenge`.
+   - The snippet uses deterministic RNG derived from the commit to generate sampled `indices`, per-index `segLen`, and optional “midpoint proof” positions (`spinePos`), plus a `token` bound to the current batch cursor.
+3. **Open**: the browser calls `POST /__pow/open` with `opens` for the sampled indices.
+   - The snippet verifies and advances the cursor; repeats until done, then issues `__Host-pow_sol`.
+
+Key properties:
+
+- **No server-side session**: all “state” is either recomputed or carried in signed cookie/token.
+- **Strict serial progression (RTT-lock)**: each `/open` depends on the previous cursor/token, so clients cannot parallelize or reorder batches.
+
+### PoSW + Merkle: why sampling works
+
+- The browser builds a strictly sequential hash chain of length `L` (“PoSW chain”).
+- It commits to the full chain with a Merkle root (`rootB64`).
+- For each sampled index `i`, the browser reveals:
+  - `hPrev = chain[i - segLen]` with its Merkle proof
+  - `hCurr = chain[i]` with its Merkle proof
+  - optional midpoint `hMid` proof for extra constraints (`spinePos`)
+- The snippet verifies:
+  - **in-segment sequential derivation** (`hPrev` → … → `hCurr` in exactly `segLen` steps)
+  - **Merkle membership proofs** for revealed chain values
+
+This makes “skipping work”, “sparse computation”, or “fabricating opens” a losing bet: the attacker must hope sampled segments never cover their “bad steps / bad intervals”.
+
+### RTT-lock and throughput ceiling
+
+With default parameters:
+
+- Total sampled indices: `S = 2 + POW_SAMPLE_K * POW_CHAL_ROUNDS = 182`
+- `POW_OPEN_BATCH = 15` ⇒ number of `/open` calls: `m = ceil(S / 15) = 13`
+- Total serial PoW API requests: `M_api = 1(/commit) + 1(/challenge) + m(/open) = 15`
+
+So a single IP’s token minting throughput is bounded by:
+
+- `tokens/s ≤ 1 / (M_api * RTT)`
+
+This limit comes from network latency (physics), not local compute.
+
+### “Exchange rate” with Cloudflare WAF Rate Limit
+
+A practical ops pattern is to put a WAF Rate Limit (e.g. `50 req / 10s / per IP`) in front of both `/__pow/*` and protected paths.
+
+Since minting one `pow_sol` consumes at least `M_api = 15` serial requests:
+
+- `1 pow_sol ≈ 15 rate-limit units`
+- Under `50/10s/IP`, each IP can mint at most `floor(50/15) = 3` tokens per 10 seconds (in the ideal case)
+
+This effectively turns Cloudflare’s rate limiter into a *stateful* quota counter, while the snippet remains stateless.
+
+### Parallelization and “chain break” economics
+
+PoSW itself is not a magical “anti-parallel” primitive. Attackers may try to split the chain at some breakpoint and compute segments in parallel, gambling that samples never cross the breakpoint.
+
+This implementation reduces the expected value of such attacks by:
+
+- verifying *contiguous segments* (`(i - segLen, i]`) — any sample crossing the breakpoint fails immediately
+- using deterministic, more evenly-covered sampling to reduce “lucky gaps”
+
+### Operational tuning tips
+
+- Prefer adjusting `POW_DIFFICULTY_COEFF` and/or lowering `POW_OPEN_BATCH` (stronger RTT-lock) instead of blindly increasing `POW_SAMPLE_K`/`POW_CHAL_ROUNDS`.
+- Keep a WAF/RL budget that includes both `/__pow/*` and protected endpoints so token minting “spends” budget at a predictable rate.
+
+### Orthogonal defense with Managed Challenge
+
+Cloudflare Managed Challenge (issuing `cf_clearance`) is orthogonal to this snippet’s `__Host-pow_*` cookies:
+
+- Cookies are independent and naturally stack in browsers.
+- If Managed Challenge runs early on navigation requests, it usually does not add friction to `/__pow/*` calls.
+- With `POW_BIND_TLS=true`, combining `cf_clearance` (CF’s fingerprinting) and PoW binding significantly raises the bar for “split-role” attacks (one party solves, another abuses).
