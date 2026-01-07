@@ -15,6 +15,8 @@ This project provides a self-contained L7 “front firewall” that:
 ## Files
 
 - `pow.js`: source snippet (PoW API + PoW gate).
+- `glue.js`: browser-side UI + orchestration (loaded by the challenge page).
+- `esm/esm.js`: browser-side PoW solver (`computePoswCommit`).
 - `template.html`: minimal challenge page template injected into the build.
 - `build.mjs`: build script (esbuild + HTML minify) → `dist/pow_snippet.js`.
 - `dist/pow_snippet.js`: ready-to-paste Cloudflare Snippet output.
@@ -36,7 +38,6 @@ Notes:
   - `TURNSTILE_SITEKEY`
   - `TURNSTILE_SECRET`
 - `pattern` matching is first-match-wins; put more specific rules first.
-- This snippet is intentionally **business-agnostic**: it does not rewrite paths and does not implement `?sign=` validation.
 
 ## Config Reference
 
@@ -171,9 +172,7 @@ Output: `dist/pow_snippet.js` (checks the Cloudflare Snippet 32KB limit).
 
 ---
 
-## Design Notes (Legacy, still applies)
-
-The original implementation lived in a larger “combined” snippet, but the PoW protocol and its design rationale are unchanged.
+## Design Notes
 
 ### Goals
 
@@ -259,10 +258,6 @@ This implementation reduces the expected value of such attacks by:
 - Prefer adjusting `POW_DIFFICULTY_COEFF` and/or lowering `POW_OPEN_BATCH` (stronger RTT-lock) instead of blindly increasing `POW_SAMPLE_K`/`POW_CHAL_ROUNDS`.
 - Keep a WAF/RL budget that includes both `/__pow/*` and protected endpoints so token minting “spends” budget at a predictable rate.
 
-### Orthogonal defense with Managed Challenge
+### Managed Challenge (optional)
 
-Cloudflare Managed Challenge (issuing `cf_clearance`) is orthogonal to this snippet’s `__Host-pow_*` cookies:
-
-- Cookies are independent and naturally stack in browsers.
-- If Managed Challenge runs early on navigation requests, it usually does not add friction to `/__pow/*` calls.
-- With `POW_BIND_TLS=true`, combining `cf_clearance` (CF’s fingerprinting) and PoW binding significantly raises the bar for “split-role” attacks (one party solves, another abuses).
+If you enable Turnstile (`turncheck: true`) with `cData` binding, Managed Challenge often adds little value and is usually unnecessary. Prefer tuning PoW/Turnstile + WAF Rate Limit; keep Managed Challenge only if you want an extra, independent hurdle.
