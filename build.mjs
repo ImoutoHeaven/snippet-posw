@@ -1,8 +1,9 @@
 import { build } from "esbuild";
-import { mkdir, rm, stat, readFile } from "fs/promises";
+import { mkdir, rm, stat, readFile, writeFile } from "fs/promises";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
-import { minify } from "html-minifier-terser";
+import { minify as minifyHtml } from "html-minifier-terser";
+import { minify as minifyJs } from "terser";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -16,7 +17,7 @@ console.log("Reading HTML template...");
 const templateContent = await readFile(templatePath, "utf-8");
 
 console.log("Minifying HTML template...");
-const minifiedHtml = await minify(templateContent, {
+const minifiedHtml = await minifyHtml(templateContent, {
   collapseWhitespace: true,
   removeComments: true,
   removeRedundantAttributes: true,
@@ -70,9 +71,20 @@ await build({
   },
 });
 
+const built = await readFile(outfile, "utf-8");
+const terserResult = await minifyJs(built, {
+  ecma: 2022,
+  module: true,
+  compress: { passes: 3, toplevel: true },
+  mangle: { toplevel: true },
+  format: { ascii_only: true },
+});
+if (terserResult && typeof terserResult.code === "string") {
+  await writeFile(outfile, terserResult.code);
+}
+
 const { size } = await stat(outfile);
 const limit = 32 * 1024;
 const status = size <= limit ? "OK" : "OVER";
 console.log(`Built snippet: ${outfile} (${size} bytes, ${status} ${limit} bytes)`);
 if (size > limit) process.exitCode = 1;
-

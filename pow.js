@@ -388,35 +388,10 @@ const timingSafeEqual = (a, b) => {
   return diff === 0;
 };
 
-const safeHeaders = (origin) => {
-  const headers = new Headers();
-  if (origin) {
-    headers.set("Access-Control-Allow-Origin", origin);
-    headers.set("Access-Control-Allow-Credentials", "true");
-    headers.append("Vary", "Origin");
-  } else {
-    headers.set("Access-Control-Allow-Origin", "*");
-  }
-  headers.set("Access-Control-Allow-Headers", "*");
-  headers.set("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS,POST");
-  return headers;
-};
-
-const respondText = (origin, msg, status = 200) => {
-  const headers = safeHeaders(origin);
-  headers.set("Cache-Control", "no-store");
-  headers.set("Content-Type", "text/plain; charset=utf-8");
-  return new Response(msg, { status, headers });
-};
-
-const respondJson = (origin, payload, status = 200) => {
-  const headers = safeHeaders(origin);
-  headers.set("Cache-Control", "no-store");
-  headers.set("Content-Type", "application/json; charset=utf-8");
-  return new Response(JSON.stringify(payload), { status, headers });
-};
-
-const deny = (origin, msg) => respondText(origin, msg, 403);
+const S = (status) => new Response(null, { status });
+const J = (payload, status = 200, headers) =>
+  new Response(JSON.stringify(payload), { status, headers });
+const deny = () => S(403);
 
 const isNavigationRequest = (request) => {
   const mode = request.headers.get("Sec-Fetch-Mode") || "";
@@ -1157,9 +1132,7 @@ const respondPowChallengeHtml = async (
     DEFAULTS.POW_SEGMENT_LEN
   );
   const bindingValues = await getPowBindingValues(request, canonicalPath, config);
-  if (!bindingValues) {
-    return respondText(request.headers.get("Origin") || "", "tls fingerprint missing", 403);
-  }
+  if (!bindingValues) return deny();
   const { pathHash, ipScope, country, asn, tlsFingerprint } = bindingValues;
   const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
   const ticket = {
@@ -1205,8 +1178,8 @@ const respondPowChallengeHtml = async (
     apiPrefixB64,
     esmUrlB64,
   });
-  const headers = safeHeaders(request.headers.get("Origin") || "");
-  headers.set("Content-Type", "text/html; charset=utf-8");
+  const headers = new Headers();
+  headers.set("Content-Type", "text/html");
   headers.set("Cache-Control", "no-store");
   return new Response(html, { status: 200, headers });
 };
@@ -1384,17 +1357,16 @@ const sampleIndicesDeterministicV2 = ({
 };
 
 const handlePowCommit = async (request, url, nowSeconds) => {
-  const origin = request.headers.get("Origin") || "";
   const body = await readJsonBody(request);
   if (!body || typeof body !== "object") {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const ticketB64 = typeof body.ticketB64 === "string" ? body.ticketB64 : "";
   const rootB64 = typeof body.rootB64 === "string" ? body.rootB64 : "";
   const pathHash = typeof body.pathHash === "string" ? body.pathHash : "";
   const nonce = typeof body.nonce === "string" ? body.nonce : "";
   if (!ticketB64 || !rootB64 || !nonce) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   if (
     !isBase64Url(ticketB64, 1, B64_TICKET_MAX_LEN) ||
@@ -1402,33 +1374,33 @@ const handlePowCommit = async (request, url, nowSeconds) => {
     !isBase64Url(nonce, NONCE_MIN_LEN, NONCE_MAX_LEN) ||
     pathHash.length > B64_HASH_MAX_LEN
   ) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const ticket = parsePowTicket(ticketB64);
-  if (!ticket) return deny(origin, "ticket invalid");
+  if (!ticket) return deny();
   const baseConfig = getConfigById(ticket.cfgId);
-  if (!baseConfig) return deny(origin, "config invalid");
+  if (!baseConfig) return deny();
   const config = { ...DEFAULTS, ...baseConfig };
   const powSecret = getPowSecret(config);
-  if (!powSecret) return respondText(origin, "misconfigured", 500);
-  if (config.powcheck !== true) return respondText(origin, "misconfigured", 500);
+  if (!powSecret) return S(500);
+  if (config.powcheck !== true) return S(500);
   const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
-  if (ticket.v !== powVersion) return deny(origin, "ticket invalid");
-  if (isExpired(ticket.e, nowSeconds)) return deny(origin, "ticket expired");
+  if (ticket.v !== powVersion) return deny();
+  if (isExpired(ticket.e, nowSeconds)) return deny();
   const bindPath = config.POW_BIND_PATH !== false;
   if (bindPath && !isBase64Url(pathHash, 1, B64_HASH_MAX_LEN)) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const normalizedPathHash = bindPath ? pathHash : "any";
   if (bindPath && !normalizedPathHash) {
-    return respondText(origin, "invalid path", 400);
+    return S(400);
   }
   const bindingValues = await getPowBindingValuesWithPathHash(
     request,
     normalizedPathHash,
     config
   );
-  if (!bindingValues) return respondText(origin, "tls fingerprint missing", 403);
+  if (!bindingValues) return deny();
   const bindingString = makePowBindingString(
     ticket,
     url.hostname,
@@ -1439,10 +1411,10 @@ const handlePowCommit = async (request, url, nowSeconds) => {
     bindingValues.tlsFingerprint
   );
   const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
-  if (!timingSafeEqual(expectedMac, ticket.mac)) return deny(origin, "ticket invalid");
+  if (!timingSafeEqual(expectedMac, ticket.mac)) return deny();
   const rootBytes = base64UrlDecodeToBytes(rootB64);
   if (!rootBytes || rootBytes.length !== 32) {
-    return respondText(origin, "invalid root", 400);
+    return S(400);
   }
   const ttl = normalizeNumber(config.POW_COMMIT_TTL_SEC, DEFAULTS.POW_COMMIT_TTL_SEC) || 0;
   const exp = nowSeconds + Math.max(1, ttl);
@@ -1457,29 +1429,26 @@ const handlePowCommit = async (request, url, nowSeconds) => {
     spineSeed
   );
   const value = `v3.${ticketB64}.${rootB64}.${bindingValues.pathHash}.${nonce}.${exp}.${spineSeed}.${mac}`;
-  const headers = safeHeaders(origin);
-  headers.set("Content-Type", "application/json; charset=utf-8");
-  headers.set("Cache-Control", "no-store");
+  const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_COMMIT_COOKIE, value, ttl);
-  return new Response(JSON.stringify({ ok: true }), { status: 200, headers });
+  return new Response(null, { status: 200, headers });
 };
 
 const handlePowChallenge = async (request, url, nowSeconds) => {
-  const origin = request.headers.get("Origin") || "";
   const cookies = parseCookieHeader(request.headers.get("Cookie"));
   const commitRaw = cookies.get(DEFAULTS.POW_COMMIT_COOKIE) || "";
   const commit = parsePowCommitCookie(commitRaw);
-  if (!commit) return deny(origin, "commit missing");
+  if (!commit) return deny();
   const ticket = parsePowTicket(commit.ticketB64);
-  if (!ticket) return deny(origin, "ticket invalid");
+  if (!ticket) return deny();
   const baseConfig = getConfigById(ticket.cfgId);
-  if (!baseConfig) return deny(origin, "config invalid");
+  if (!baseConfig) return deny();
   const config = { ...DEFAULTS, ...baseConfig };
   const powSecret = getPowSecret(config);
-  if (!powSecret) return respondText(origin, "misconfigured", 500);
-  if (config.powcheck !== true) return respondText(origin, "misconfigured", 500);
-  if (isExpired(commit.exp, nowSeconds)) return deny(origin, "commit expired");
-  if (isExpired(ticket.e, nowSeconds)) return deny(origin, "ticket expired");
+  if (!powSecret) return S(500);
+  if (config.powcheck !== true) return S(500);
+  if (isExpired(commit.exp, nowSeconds)) return deny();
+  if (isExpired(ticket.e, nowSeconds)) return deny();
   const expectedMac = await makePowCommitMac(
     powSecret,
     commit.ticketB64,
@@ -1489,10 +1458,10 @@ const handlePowChallenge = async (request, url, nowSeconds) => {
     commit.exp,
     commit.spineSeed
   );
-  if (!timingSafeEqual(expectedMac, commit.mac)) return deny(origin, "commit invalid");
+  if (!timingSafeEqual(expectedMac, commit.mac)) return deny();
   const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
-  if (ticket.v !== powVersion) return deny(origin, "ticket invalid");
-  if (!Number.isFinite(ticket.L) || ticket.L <= 0) return deny(origin, "ticket invalid");
+  if (ticket.v !== powVersion) return deny();
+  if (!Number.isFinite(ticket.L) || ticket.L <= 0) return deny();
   const rounds = Math.max(
     1,
     Math.floor(
@@ -1529,7 +1498,7 @@ const handlePowChallenge = async (request, url, nowSeconds) => {
     forceEdgeLast: config.POW_FORCE_EDGE_LAST === true || hashcashBits > 0,
     rng,
   });
-  if (!indices.length) return deny(origin, "challenge invalid");
+  if (!indices.length) return deny();
   const segSeed16 = await deriveSegLenSeed16(powSecret, ticket.cfgId, commit.mac, sid);
   const rngSeg = makeXoshiro128ss(segSeed16);
   const segLensAll = computeSegLensForIndices(indices, segSpec, rngSeg);
@@ -1544,7 +1513,7 @@ const handlePowChallenge = async (request, url, nowSeconds) => {
   );
   const cursor = 0;
   const batch = indices.slice(cursor, cursor + batchLen);
-  if (!batch.length) return deny(origin, "challenge invalid");
+  if (!batch.length) return deny();
   const segBatch = segLensAll.slice(cursor, cursor + batchLen);
   const spineSeed16 = await deriveSpineSeed16(
     powSecret,
@@ -1568,43 +1537,34 @@ const handlePowChallenge = async (request, url, nowSeconds) => {
     batchLen,
     spinePos
   );
-  const headers = safeHeaders(origin);
-  headers.set("Content-Type", "application/json; charset=utf-8");
-  headers.set("Cache-Control", "no-store");
-  return new Response(
-    JSON.stringify({
-      done: false,
-      sid,
-      L: ticket.L,
-      cursor,
-      batchLen,
-      indices: batch,
-      segs: segBatch,
-      spinePos,
-      token,
-    }),
-    { status: 200, headers }
-  );
+  return J({
+    done: false,
+    sid,
+    cursor,
+    indices: batch,
+    segs: segBatch,
+    spinePos,
+    token,
+  });
 };
 
 const handlePowOpen = async (request, url, nowSeconds) => {
-  const origin = request.headers.get("Origin") || "";
   const cookies = parseCookieHeader(request.headers.get("Cookie"));
   const commitRaw = cookies.get(DEFAULTS.POW_COMMIT_COOKIE) || "";
   const commit = parsePowCommitCookie(commitRaw);
-  if (!commit) return deny(origin, "commit missing");
+  if (!commit) return deny();
   const ticket = parsePowTicket(commit.ticketB64);
-  if (!ticket) return deny(origin, "ticket invalid");
+  if (!ticket) return deny();
   const baseConfig = getConfigById(ticket.cfgId);
-  if (!baseConfig) return deny(origin, "config invalid");
+  if (!baseConfig) return deny();
   const config = { ...DEFAULTS, ...baseConfig };
   const powSecret = getPowSecret(config);
-  if (!powSecret) return respondText(origin, "misconfigured", 500);
-  if (config.powcheck !== true) return respondText(origin, "misconfigured", 500);
+  if (!powSecret) return S(500);
+  if (config.powcheck !== true) return S(500);
   const powVersion = normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
-  if (ticket.v !== powVersion) return deny(origin, "ticket invalid");
-  if (isExpired(commit.exp, nowSeconds)) return deny(origin, "commit expired");
-  if (isExpired(ticket.e, nowSeconds)) return deny(origin, "ticket expired");
+  if (ticket.v !== powVersion) return deny();
+  if (isExpired(commit.exp, nowSeconds)) return deny();
+  if (isExpired(ticket.e, nowSeconds)) return deny();
   const commitMac = await makePowCommitMac(
     powSecret,
     commit.ticketB64,
@@ -1614,10 +1574,10 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     commit.exp,
     commit.spineSeed
   );
-  if (!timingSafeEqual(commitMac, commit.mac)) return deny(origin, "commit invalid");
+  if (!timingSafeEqual(commitMac, commit.mac)) return deny();
   const body = await readJsonBody(request);
   if (!body || typeof body !== "object") {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const sid = typeof body.sid === "string" ? body.sid : "";
   const cursor = Number.parseInt(body.cursor, 10);
@@ -1625,16 +1585,16 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   const opens = Array.isArray(body.opens) ? body.opens : null;
   const spinePosRaw = body.spinePos;
   if (!sid || !token || !opens || !Number.isFinite(cursor) || cursor < 0) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   if (!Array.isArray(spinePosRaw)) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   if (
     !isBase64Url(sid, SID_LEN, SID_LEN) ||
     !isBase64Url(token, TOKEN_MIN_LEN, TOKEN_MAX_LEN)
   ) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const batchMax = Math.max(
     1,
@@ -1645,13 +1605,13 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       )
     )
   );
-  if (batchMax <= 0) return respondText(origin, "misconfigured", 500);
+  if (batchMax <= 0) return S(500);
   const spinePos = normalizeSpinePosList(spinePosRaw, batchMax);
   if (!spinePos) {
-    return respondText(origin, "invalid payload", 400);
+    return S(400);
   }
   const sidExpected = await derivePowSid(powSecret, ticket.cfgId, commit.mac);
-  if (sid !== sidExpected) return deny(origin, "challenge invalid");
+  if (sid !== sidExpected) return deny();
   const expectedToken = await makePowStateToken(
     powSecret,
     ticket.cfgId,
@@ -1661,7 +1621,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     batchMax,
     spinePos
   );
-  if (!timingSafeEqual(expectedToken, token)) return deny(origin, "challenge invalid");
+  if (!timingSafeEqual(expectedToken, token)) return deny();
   const rounds = Math.max(
     1,
     Math.floor(
@@ -1702,7 +1662,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     forceEdgeLast: config.POW_FORCE_EDGE_LAST === true || hashcashBits > 0,
     rng,
   });
-  if (!indices || !indices.length) return deny(origin, "challenge invalid");
+  if (!indices || !indices.length) return deny();
   const segSeed16 = await deriveSegLenSeed16(
     powSecret,
     ticket.cfgId,
@@ -1712,14 +1672,14 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   const rngSeg = makeXoshiro128ss(segSeed16);
   const segLensAll = computeSegLensForIndices(indices, segSpec, rngSeg);
   if (hashcashBits > 0 && !indices.includes(ticket.L)) {
-    return deny(origin, "challenge invalid");
+    return deny();
   }
   const expectedBatch = indices.slice(cursor, cursor + batchMax);
-  if (!expectedBatch.length) return deny(origin, "challenge invalid");
+  if (!expectedBatch.length) return deny();
   const segBatch = segLensAll.slice(cursor, cursor + batchMax);
   if (spinePos.length) {
     for (const pos of spinePos) {
-      if (pos >= expectedBatch.length) return deny(origin, "challenge invalid");
+      if (pos >= expectedBatch.length) return deny();
     }
   }
   const eligibleSpine = [];
@@ -1733,32 +1693,32 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   }
   const expectedSpineCount = Math.min(spineK, eligibleSpine.length);
   if (spinePos.length !== expectedSpineCount) {
-    return deny(origin, "challenge invalid");
+    return deny();
   }
   if (expectedSpineCount > 0) {
     const eligibleSet = new Set(eligibleSpine);
     for (const pos of spinePos) {
-      if (!eligibleSet.has(pos)) return deny(origin, "challenge invalid");
+      if (!eligibleSet.has(pos)) return deny();
     }
   }
   const spinePosSet = spinePos.length ? new Set(spinePos) : null;
   const batchSize = opens.length;
   if (batchSize !== expectedBatch.length) {
-    return deny(origin, "challenge invalid");
+    return deny();
   }
   const batch = [];
   for (let i = 0; i < batchSize; i++) {
     const open = opens[i];
     const idx = open && Number.parseInt(open.i, 10);
     if (!Number.isFinite(idx) || idx < 1 || idx > ticket.L) {
-      return respondText(origin, "invalid payload", 400);
+      return S(400);
     }
     const expectedIdx = expectedBatch[i];
-    if (idx !== expectedIdx) return deny(origin, "challenge invalid");
+    if (idx !== expectedIdx) return deny();
     const requiresMid = spinePosSet && spinePosSet.has(i);
     const segLen = segBatch[i];
     if (!Number.isFinite(segLen) || segLen <= 0) {
-      return deny(origin, "challenge invalid");
+      return deny();
     }
     const hPrev = open && typeof open.hPrev === "string" ? open.hPrev : "";
     const hCurr = open && typeof open.hCurr === "string" ? open.hCurr : "";
@@ -1766,7 +1726,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       !isBase64Url(hPrev, 1, B64_HASH_MAX_LEN) ||
       !isBase64Url(hCurr, 1, B64_HASH_MAX_LEN)
     ) {
-      return respondText(origin, "invalid payload", 400);
+      return S(400);
     }
     const proofPrev = open && open.proofPrev;
     const proofCurr = open && open.proofCurr;
@@ -1776,36 +1736,36 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       !Array.isArray(proofPrev.sibs) ||
       !Array.isArray(proofCurr.sibs)
     ) {
-      return respondText(origin, "invalid payload", 400);
+      return S(400);
     }
     if (proofPrev.sibs.length > MAX_PROOF_SIBS || proofCurr.sibs.length > MAX_PROOF_SIBS) {
-      return respondText(origin, "invalid payload", 400);
+      return S(400);
     }
     for (const sib of proofPrev.sibs) {
       if (!isBase64Url(String(sib || ""), 1, B64_HASH_MAX_LEN)) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
     }
     for (const sib of proofCurr.sibs) {
       if (!isBase64Url(String(sib || ""), 1, B64_HASH_MAX_LEN)) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
     }
     if (requiresMid) {
       const hMid = open && typeof open.hMid === "string" ? open.hMid : "";
       if (!isBase64Url(hMid, 1, B64_HASH_MAX_LEN)) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
       const proofMid = open && open.proofMid;
       if (!proofMid || !Array.isArray(proofMid.sibs)) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
       if (proofMid.sibs.length > MAX_PROOF_SIBS) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
       for (const sib of proofMid.sibs) {
         if (!isBase64Url(String(sib || ""), 1, B64_HASH_MAX_LEN)) {
-          return respondText(origin, "invalid payload", 400);
+          return S(400);
         }
       }
     }
@@ -1816,7 +1776,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     commit.pathHash,
     config
   );
-  if (!bindingValues) return respondText(origin, "tls fingerprint missing", 403);
+  if (!bindingValues) return deny();
   const bindingString = makePowBindingString(
     ticket,
     url.hostname,
@@ -1827,11 +1787,11 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     bindingValues.tlsFingerprint
   );
   const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
-  if (!timingSafeEqual(expectedMac, ticket.mac)) return deny(origin, "ticket invalid");
+  if (!timingSafeEqual(expectedMac, ticket.mac)) return deny();
   const rootBytes = base64UrlDecodeToBytes(commit.rootB64);
-  if (!rootBytes || rootBytes.length !== 32) return deny(origin, "commit invalid");
+  if (!rootBytes || rootBytes.length !== 32) return deny();
   const leafCount = Math.max(0, Math.floor(ticket.L)) + 1;
-  if (leafCount < 2) return deny(origin, "ticket invalid");
+  if (leafCount < 2) return deny();
   const seedHash = await hashPoswSeed(bindingString, commit.nonce);
   for (const entry of batch) {
     const idx = entry.idx;
@@ -1841,14 +1801,14 @@ const handlePowOpen = async (request, url, nowSeconds) => {
     const hPrevBytes = base64UrlDecodeToBytes(String(open.hPrev || ""));
     const hCurrBytes = base64UrlDecodeToBytes(String(open.hCurr || ""));
     if (!hPrevBytes || !hCurrBytes || hPrevBytes.length !== 32 || hCurrBytes.length !== 32) {
-      return respondText(origin, "invalid payload", 400);
+      return S(400);
     }
     const proofPrev = open.proofPrev;
     const proofCurr = open.proofCurr;
     const effectiveSegmentLen = Math.min(segLen, idx);
     let prevBytes = hPrevBytes;
     const firstIdx = idx - effectiveSegmentLen;
-    if (firstIdx < 0) return deny(origin, "challenge invalid");
+    if (firstIdx < 0) return deny();
     const midIdx = requiresMid ? computeMidIndex(idx, segLen) : null;
     let midExpected = null;
     for (let step = 1; step <= effectiveSegmentLen; step++) {
@@ -1857,18 +1817,18 @@ const handlePowOpen = async (request, url, nowSeconds) => {
         midExpected = expected;
       }
       if (step === effectiveSegmentLen) {
-        if (!bytesEqual(expected, hCurrBytes)) return deny(origin, "challenge invalid");
+        if (!bytesEqual(expected, hCurrBytes)) return deny();
       } else {
         prevBytes = expected;
       }
     }
     if (requiresMid) {
-      if (midIdx === null || !midExpected) return deny(origin, "challenge invalid");
+      if (midIdx === null || !midExpected) return deny();
       const hMidBytes = base64UrlDecodeToBytes(String(open.hMid || ""));
       if (!hMidBytes || hMidBytes.length !== 32) {
-        return respondText(origin, "invalid payload", 400);
+        return S(400);
       }
-      if (!bytesEqual(midExpected, hMidBytes)) return deny(origin, "challenge invalid");
+      if (!bytesEqual(midExpected, hMidBytes)) return deny();
       const okMid = await verifyMerkleProof(
         rootBytes,
         hMidBytes,
@@ -1876,10 +1836,10 @@ const handlePowOpen = async (request, url, nowSeconds) => {
         leafCount,
         open.proofMid
       );
-      if (!okMid) return deny(origin, "challenge invalid");
+      if (!okMid) return deny();
     }
     if (idx === 1 && !bytesEqual(hPrevBytes, seedHash)) {
-      return deny(origin, "challenge invalid");
+      return deny();
     }
     const okPrev = await verifyMerkleProof(
       rootBytes,
@@ -1888,7 +1848,7 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       leafCount,
       proofPrev
     );
-    if (!okPrev) return deny(origin, "challenge invalid");
+    if (!okPrev) return deny();
     const okCurr = await verifyMerkleProof(
       rootBytes,
       hCurrBytes,
@@ -1896,11 +1856,11 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       leafCount,
       proofCurr
     );
-    if (!okCurr) return deny(origin, "challenge invalid");
+    if (!okCurr) return deny();
     if (idx === ticket.L && hashcashBits > 0) {
       const digest = await hashcashRootLast(rootBytes, hCurrBytes);
       if (leadingZeroBits(digest) < hashcashBits) {
-        return deny(origin, "challenge invalid");
+        return deny();
       }
     }
   }
@@ -1930,27 +1890,20 @@ const handlePowOpen = async (request, url, nowSeconds) => {
       batchMax,
       nextSpinePos
     );
-    const headers = safeHeaders(origin);
-    headers.set("Content-Type", "application/json; charset=utf-8");
-    headers.set("Cache-Control", "no-store");
-    return new Response(
-      JSON.stringify({
-        done: false,
-        sid: sidExpected,
-        cursor: nextCursor,
-        batchLen: batchMax,
-        indices: nextBatch,
-        segs: nextSegBatch,
-        spinePos: nextSpinePos,
-        token: nextToken,
-      }),
-      { status: 200, headers }
-    );
+    return J({
+      done: false,
+      sid: sidExpected,
+      cursor: nextCursor,
+      indices: nextBatch,
+      segs: nextSegBatch,
+      spinePos: nextSpinePos,
+      token: nextToken,
+    });
   }
   const solTtl = normalizeNumber(config.POW_SOL_TTL_SEC, DEFAULTS.POW_SOL_TTL_SEC) || 0;
   const remaining = ticket.e - nowSeconds;
   const ttl = Math.max(1, Math.min(solTtl, remaining));
-  if (!Number.isFinite(ttl) || ttl <= 0) return deny(origin, "ticket expired");
+  if (!Number.isFinite(ttl) || ttl <= 0) return deny();
   const exp = nowSeconds + ttl;
   const solTicket = {
     v: powVersion,
@@ -1974,22 +1927,19 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   const iat = nowSeconds;
   const solMac = await makePowSolMacV4(powSecret, solTicketB64, iat, iat, 0);
   const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
-  const headers = safeHeaders(origin);
-  headers.set("Content-Type", "application/json; charset=utf-8");
-  headers.set("Cache-Control", "no-store");
+  const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_SOL_COOKIE, solValue, ttl);
   clearCookie(headers, DEFAULTS.POW_COMMIT_COOKIE);
-  return new Response(JSON.stringify({ done: true }), { status: 200, headers });
+  return J({ done: true }, 200, headers);
 };
 
 const handlePowApi = async (request, url, nowSeconds) => {
-  const origin = request.headers.get("Origin") || "";
   if (request.method !== "POST") {
-    return respondText(origin, "method not allowed", 405);
+    return S(405);
   }
   const path = normalizePath(url.pathname);
   if (!path || !path.startsWith(`${POW_API_PREFIX}/`)) {
-    return respondText(origin, "not found", 404);
+    return S(404);
   }
   const action = path.slice(POW_API_PREFIX.length);
   if (action === "/commit") {
@@ -2001,30 +1951,29 @@ const handlePowApi = async (request, url, nowSeconds) => {
   if (action === "/open") {
     return handlePowOpen(request, url, nowSeconds);
   }
-  return respondText(origin, "not found", 404);
+  return S(404);
 };
 
 export default {
   async fetch(request, env, ctx) {
-    const origin = request.headers.get("Origin") || "";
     const url = new URL(request.url);
     const hostname = url.hostname;
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: safeHeaders(origin) });
+      return S(204);
     }
 
     const nowSeconds = Math.floor(Date.now() / 1000);
 
     const requestPath = normalizePath(url.pathname);
-    if (!requestPath) return respondText(origin, "invalid path", 400);
+    if (!requestPath) return S(400);
     if (requestPath.startsWith(`${POW_API_PREFIX}/`)) {
       return handlePowApi(request, url, nowSeconds);
     }
 
     const selected = pickConfigWithId(hostname, requestPath);
     const config = selected ? { ...DEFAULTS, ...selected.config } : null;
-    if (!config) return respondText(origin, "misconfigured", 500);
+    if (!config) return S(500);
     const cfgId = selected.cfgId;
 
     if (config.powcheck !== true) {
@@ -2033,14 +1982,14 @@ export default {
 
     const bindRes = resolveBindPathForPow(request, url, requestPath, config);
     if (!bindRes.ok) {
-      if (bindRes.code === "missing") return respondText(origin, "path is required", 400);
-      if (bindRes.code === "invalid") return respondText(origin, "invalid path", 400);
-      return respondText(origin, "misconfigured", 500);
+      if (bindRes.code === "missing") return S(400);
+      if (bindRes.code === "invalid") return S(400);
+      return S(500);
     }
 
     const powSecret = getPowSecret(config);
-    if (!powSecret) return respondText(origin, "misconfigured", 500);
-    if (!config.POW_ESM_URL) return respondText(origin, "misconfigured", 500);
+    if (!powSecret) return S(500);
+    if (!config.POW_ESM_URL) return S(500);
 
     const powMeta = await verifyPowSol(
       request,
@@ -2066,7 +2015,7 @@ export default {
     }
 
     if (!isNavigationRequest(request)) {
-      return respondJson(origin, { code: "pow_required" }, 403);
+      return J({ code: "pow_required" }, 403);
     }
 
     return respondPowChallengeHtml(

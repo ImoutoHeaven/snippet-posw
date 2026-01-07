@@ -7,6 +7,7 @@
   },
   "devDependencies": {
     "esbuild": "0.23.1",
-    "html-minifier-terser": "7.2.0"
+    "html-minifier-terser": "7.2.0",
+    "terser": "5.39.0"
   }
 }
