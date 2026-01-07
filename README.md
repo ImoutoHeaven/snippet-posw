@@ -55,7 +55,7 @@ Each `CONFIG` entry looks like:
 ### `config` keys (all supported)
 
 | Key | Type | Default | Description |
-|---|---|---|
+|---|---|---|---|
 | `powcheck` | `boolean` | `false` | Enable PoW gate (requires `__Host-pow_sol`). |
 | `turncheck` | `boolean` | `false` | Enable Turnstile gate (requires `__Host-turn_sol` and enables `POST /__pow/turn`). |
 | `POW_TOKEN` | `string` | — | HMAC secret for ticket binding + cookie MACs. Required when `powcheck` or `turncheck` is `true`. |
