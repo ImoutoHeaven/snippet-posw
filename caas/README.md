@@ -49,8 +49,8 @@ Typical flow:
 
 If you use the provided browser helper (`frontend/caas-client.js`), expose two app endpoints that wrap CaaS:
 
-- `POST /api/caas/generate` → calls `POST /__pow/v1/server/generate`
-- `POST /api/caas/attest` → calls `POST /__pow/v1/server/attest` and returns your application-specific decision
+- `POST /api/caas/generate` → calls `POST {API_PREFIX}/server/generate`
+- `POST /api/caas/attest` → calls `POST {API_PREFIX}/server/attest` and returns your application-specific decision
 
 See `examples/node-demo.mjs` for a minimal end-to-end implementation.
 
