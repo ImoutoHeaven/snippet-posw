@@ -13,7 +13,10 @@ Challenge-as-a-Service (CaaS) for Cloudflare Snippets/Workers.
 
 ## Configuration
 
-Configure the constants in `caas.js`:
+Configure `CONFIG` in `caas.js`:
+
+- Single-site: set `CONFIG` to an object.
+- Multi-site: set `CONFIG` to an array of `{ pattern, config }` entries (first-match-wins; pattern syntax matches the Gate snippet).
 
 - `POW_TOKEN`: master secret used for HMAC + AES-GCM key derivation (required).
 - `SERVICE_TOKEN`: bearer token for `POST /__pow/v1/server/*` (required).

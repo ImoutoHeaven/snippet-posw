@@ -1,7 +1,7 @@
 // Cloudflare Snippet/Worker: Challenge-as-a-Service (CaaS)
-// - postMessage 优先（iframe/popup），redirect 兜底
-// - chal/state/proofToken 无状态可验（HMAC + AEAD）
-// - Phase2（PoW）集成在同一份脚本中，但不依赖 request.cf 绑定
+// - postMessage-first (iframe/popup), redirect fallback
+// - stateless tokens (HMAC + AEAD)
+// - Phase 2 (PoW) included in this file; does not rely on request.cf bindings
 
 const DEFAULTS = {
   API_PREFIX: "/__pow/v1",
@@ -37,32 +37,35 @@ const DEFAULTS = {
   POW_COMMIT_TTL_SEC: 300,
 };
 
-// 你需要修改这里：
+// Configuration:
+// - For single-site deployment: set CONFIG to an object.
+// - For multi-site deployment: set CONFIG to an array of `{ pattern, config }` entries
+//   (first-match-wins; pattern syntax matches the Gate snippet).
 const CONFIG = {
-  // 主密钥：用于 chal/state/proofToken HMAC + ctxEnc key 派生
+  // Master secret used for chal/state/proofToken HMAC + AES-GCM ctx sealing.
   POW_TOKEN: "replace-with-powToken",
 
-  // 后端调用鉴权
+  // Auth token for backend callers (server/* endpoints).
   SERVICE_TOKEN: "replace-with-serviceToken",
 
   // Turnstile
   TURNSTILE_SITEKEY: "replace-with-sitekey",
   TURNSTILE_SECRET: "replace-with-secret",
 
-  // 允许哪些业务域作为 parentOrigin（用于 frame-ancestors + postMessage 校验）
-  // 示例：["https://app.example.com", "http://localhost:8788"]
+  // Allowlist of parent origins (for CSP frame-ancestors + postMessage origin checks).
+  // Example: ["https://app.example.com", "http://localhost:8788"]
   ALLOWED_PARENT_ORIGINS: [],
 
-  // 如需让业务页直接调用 /client/*（非 landing 同源调用），配置 CORS 白名单
+  // Optional CORS allowlist if your app calls /client/* directly (instead of same-origin landing).
   ALLOWED_CLIENT_ORIGINS: [],
 
-  // landing 最小页会动态 import 这个 glue（建议自托管到 caas 域或可信 CDN）
-  // 示例："https://caas.example.com/assets/caas-glue.js"
+  // Landing page dynamically imports this glue module (recommended: self-host or trusted CDN).
+  // Example: "https://caas.example.com/assets/caas-glue.js"
   CAAS_GLUE_URL:
     "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@4605ca27c264e69da52eadc031cbd543a1118669/caas/glue.js",
 
-  // PoW solver（computePoswCommit）模块 URL（建议自托管/固定版本）
-  // 示例："https://caas.example.com/assets/esm.js"
+  // PoW solver (computePoswCommit) module URL (recommended: self-host / pin the version).
+  // Example: "https://caas.example.com/assets/esm.js"
   CAAS_POW_ESM_URL:
     "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@4605ca27c264e69da52eadc031cbd543a1118669/caas/esm/esm.js",
 };
@@ -70,6 +73,105 @@ const CONFIG = {
 const HTML_TEMPLATE = typeof __HTML_TEMPLATE__ === "string" ? __HTML_TEMPLATE__ : "";
 
 const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
+
+// --- Optional multi-site config picker (pattern syntax matches Gate) ---
+
+const splitPattern = (pattern) => {
+  if (typeof pattern !== "string") return null;
+  const trimmed = pattern.trim();
+  if (!trimmed) return null;
+  const slashIndex = trimmed.indexOf("/");
+  if (slashIndex === -1) return { host: trimmed, path: null };
+  const host = trimmed.slice(0, slashIndex);
+  if (!host) return null;
+  return { host, path: trimmed.slice(slashIndex) };
+};
+
+const escapeRegex = (value) => value.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+
+const compileHostPattern = (pattern) => {
+  if (typeof pattern !== "string") return null;
+  const host = pattern.trim().toLowerCase();
+  if (!host) return null;
+  const escaped = escapeRegex(host).replace(/\*/g, "[^.]*");
+  try {
+    return new RegExp(`^${escaped}$`);
+  } catch {
+    return null;
+  }
+};
+
+const compilePathPattern = (pattern) => {
+  if (typeof pattern !== "string") return null;
+  const path = pattern.trim();
+  if (!path.startsWith("/")) return null;
+  let out = "";
+  for (let i = 0; i < path.length; i++) {
+    const ch = path[i];
+    if (ch === "*") {
+      if (path[i + 1] === "*") {
+        const isLast = i + 2 >= path.length;
+        const prevIsSlash = i > 0 && path[i - 1] === "/";
+        if (isLast && prevIsSlash && out.endsWith("/") && out.length > 1) {
+          out = `${out.slice(0, -1)}(?:/.*)?`;
+        } else {
+          out += ".*";
+        }
+        i++;
+      } else {
+        out += "[^/]*";
+      }
+      continue;
+    }
+    out += /[.+?^${}()|[\]\\]/.test(ch) ? `\\${ch}` : ch;
+  }
+  try {
+    return new RegExp(`^${out}$`);
+  } catch {
+    return null;
+  }
+};
+
+const compileConfigEntry = (entry) => {
+  const pattern = entry && entry.pattern;
+  const parts = splitPattern(pattern);
+  if (!parts) {
+    return { pattern, hostRegex: null, pathRegex: null, config: (entry && entry.config) || {} };
+  }
+  const hostRegex = compileHostPattern(parts.host);
+  if (!hostRegex) {
+    return { pattern, hostRegex: null, pathRegex: null, config: (entry && entry.config) || {} };
+  }
+  const pathRegex = parts.path ? compilePathPattern(parts.path) : null;
+  if (parts.path && !pathRegex) {
+    return { pattern, hostRegex: null, pathRegex: null, config: (entry && entry.config) || {} };
+  }
+  return { pattern, hostRegex, pathRegex, config: (entry && entry.config) || {} };
+};
+
+const USE_CONFIG_LIST = Array.isArray(CONFIG);
+const COMPILED_CONFIG = USE_CONFIG_LIST ? CONFIG.map(compileConfigEntry) : null;
+
+const pickConfig = (hostname, path) => {
+  if (!COMPILED_CONFIG) return null;
+  const host = typeof hostname === "string" ? hostname.toLowerCase() : "";
+  const requestPath = typeof path === "string" ? path : "";
+  if (!host) return null;
+  for (let i = 0; i < COMPILED_CONFIG.length; i++) {
+    const rule = COMPILED_CONFIG[i];
+    if (!rule || !rule.hostRegex) continue;
+    if (!rule.hostRegex.test(host)) continue;
+    if (rule.pathRegex && !rule.pathRegex.test(requestPath)) continue;
+    return rule.config || null;
+  }
+  return null;
+};
+
+const getEffectiveConfig = (hostname, requestPath) => {
+  if (!USE_CONFIG_LIST) return { ...DEFAULTS, ...CONFIG };
+  const picked = pickConfig(hostname, requestPath);
+  return picked ? { ...DEFAULTS, ...picked } : null;
+};
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -1376,7 +1478,8 @@ export default {
     const requestPath = normalizePath(url.pathname);
     if (!requestPath) return S(400);
 
-    const config = { ...DEFAULTS, ...CONFIG };
+    const config = getEffectiveConfig(url.hostname, requestPath);
+    if (!config) return S(500);
 
     if (!requestPath.startsWith(`${DEFAULTS.API_PREFIX}/`)) {
       return S(404);
