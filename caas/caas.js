@@ -499,6 +499,36 @@ const applyCors = (headers, request, config) => {
   }
 };
 
+// ---------- Best-effort replay hint (edge cache; non-atomic) ----------
+
+const getDefaultCache = () => {
+  try {
+    const c = globalThis.caches;
+    const d = c && c.default;
+    if (d && typeof d.match === "function" && typeof d.put === "function") return d;
+  } catch {}
+  return null;
+};
+
+const replayCacheKey = (origin, chalId) =>
+  new Request(`${origin}${DEFAULTS.API_PREFIX}/_replay/${chalId}`, { method: "GET" });
+
+const checkAndMarkReplayBestEffort = async (origin, chalId, ttlSec) => {
+  const cache = getDefaultCache();
+  if (!cache) return "unknown";
+  const key = replayCacheKey(origin, chalId);
+  try {
+    const hit = await cache.match(key);
+    if (hit) return "hit";
+    const ttl = clampInt(ttlSec, 1, 3600);
+    const headers = new Headers();
+    headers.set("Content-Type", "text/plain; charset=utf-8");
+    headers.set("Cache-Control", `public, max-age=${ttl}`);
+    await cache.put(key, new Response("1", { status: 200, headers }));
+  } catch {}
+  return "unknown";
+};
+
 // ---------- PoW (Phase 2) ----------
 
 const u32BE = (bytes, offset) =>
@@ -1037,12 +1067,21 @@ const handleServerAttest = async (request, nowSeconds, config) => {
   );
   const ctxBytes = await aeadDecrypt(powSecret, payload.ctxEnc, aad);
   if (!ctxBytes) return deny();
+  const replayHint = await checkAndMarkReplayBestEffort(
+    new URL(request.url).origin,
+    chalId,
+    Math.min(
+      exp - nowSeconds,
+      clampInt(config.PROOF_TTL_SEC ?? DEFAULTS.PROOF_TTL_SEC, 30, 3600)
+    )
+  );
   return J({
     ok: true,
     chalId,
     exp,
     ctxB64: base64UrlEncodeNoPad(ctxBytes),
     chalPayloadB64: payloadB64,
+    replayHint,
   });
 };
 

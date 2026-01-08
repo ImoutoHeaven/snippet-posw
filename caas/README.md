@@ -92,6 +92,7 @@ const ctxPlain = b64uJsonDecode(attest.ctxB64);
 Notes:
 
 - CaaS is stateless: replay prevention should be enforced by the caller (e.g. `ctx.jti` with Redis `SETNX`).
+- `server/attest` also returns `replayHint: "unknown" | "hit"` (best-effort via edge cache, non-atomic). Treat it as a signal only.
 - Any “business binding” (IP/country/fingerprint/account) should be carried in `ctx` and checked by the caller.
 
 ## Frontend integration
