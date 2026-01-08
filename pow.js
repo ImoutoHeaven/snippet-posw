@@ -29,6 +29,7 @@ const DEFAULTS = {
   POW_SOL_RENEW_MAX: 0,
   POW_SOL_RENEW_WINDOW_SEC: 300,
   POW_SOL_RENEW_MIN_SEC: -1,
+  POW_REPLAY_CACHE_REJECT: false,
   POW_BIND_PATH: true,
   POW_BIND_IPRANGE: true,
   POW_BIND_COUNTRY: false,
@@ -1243,6 +1244,48 @@ const clearCookie = (headers, name) => {
   setCookie(headers, name, "deleted", 0);
 };
 
+const clampTtlSec = (ttlSec, maxTtlSec) => {
+  const num = Number(ttlSec);
+  if (!Number.isFinite(num)) return 0;
+  const ttl = Math.floor(num);
+  if (ttl <= 0) return 0;
+  const maxClamp = Number.isFinite(maxTtlSec) ? Math.max(1, Math.floor(maxTtlSec)) : 86400;
+  return Math.min(maxClamp, ttl);
+};
+
+const replayCacheKey = (origin, kind, cfgId, id) => {
+  const safeKind = typeof kind === "string" ? kind : "";
+  const safeId = typeof id === "string" ? id : "";
+  const safeCfgId = Number.isFinite(cfgId) ? String(Math.trunc(cfgId)) : "unknown";
+  return new Request(
+    `${origin}${POW_API_PREFIX}/_replay/${safeKind}/${safeCfgId}/${safeId}`,
+    { method: "GET" }
+  );
+};
+
+const replayCacheMatch = async (origin, kind, cfgId, id) => {
+  try {
+    const key = replayCacheKey(origin, kind, cfgId, id);
+    const hit = await caches.default.match(key);
+    return !!hit;
+  } catch {
+    return false;
+  }
+};
+
+const replayCachePut = async (origin, kind, cfgId, id, ttlSec) => {
+  const ttl = clampTtlSec(ttlSec, 86400);
+  if (!ttl) return;
+  try {
+    const key = replayCacheKey(origin, kind, cfgId, id);
+    const headers = new Headers();
+    headers.set("Cache-Control", `max-age=${ttl}`);
+    await caches.default.put(key, new Response("1", { status: 200, headers }));
+  } catch {
+    // best effort
+  }
+};
+
 const getPowSecret = (config) => {
   const powToken = typeof config.POW_TOKEN === "string" ? config.POW_TOKEN : "";
   return powToken;
@@ -1514,6 +1557,15 @@ const handleTurn = async (request, url, nowSeconds) => {
   const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
   if (!timingSafeEqual(expectedMac, ticket.mac)) return deny();
 
+  const replayReject = config.POW_REPLAY_CACHE_REJECT === true;
+  let turnTokenHash = "";
+  if (replayReject) {
+    const digest = await sha256Bytes(token);
+    turnTokenHash = base64UrlEncodeNoPad(digest);
+    const hit = await replayCacheMatch(url.origin, "turn", ticket.cfgId, turnTokenHash);
+    if (hit) return deny();
+  }
+
   const form = new URLSearchParams();
   form.set("secret", turnSecret);
   form.set("response", token);
@@ -1568,6 +1620,9 @@ const handleTurn = async (request, url, nowSeconds) => {
   const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
   const headers = new Headers();
   setCookie(headers, TURN_SOL_COOKIE, solValue, ttl);
+  if (replayReject && turnTokenHash) {
+    await replayCachePut(url.origin, "turn", ticket.cfgId, turnTokenHash, ttl);
+  }
   return new Response(null, { status: 200, headers });
 };
 
@@ -1814,6 +1869,12 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   const expectedBatch = indices.slice(cursor, cursor + batchMax);
   if (!expectedBatch.length) return deny();
   const segBatch = segLensAll.slice(cursor, cursor + batchMax);
+  const replayReject = config.POW_REPLAY_CACHE_REJECT === true;
+  const openFinalCandidate = cursor + expectedBatch.length >= indices.length;
+  if (replayReject && openFinalCandidate) {
+    const hit = await replayCacheMatch(url.origin, "open", ticket.cfgId, token);
+    if (hit) return deny();
+  }
   if (spinePos.length) {
     for (const pos of spinePos) {
       if (pos >= expectedBatch.length) return deny();
@@ -2067,6 +2128,9 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_SOL_COOKIE, solValue, ttl);
   clearCookie(headers, DEFAULTS.POW_COMMIT_COOKIE);
+  if (replayReject) {
+    await replayCachePut(url.origin, "open", ticket.cfgId, token, ttl);
+  }
   return J({ done: true }, 200, headers);
 };
 

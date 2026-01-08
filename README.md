@@ -80,6 +80,7 @@ Each `CONFIG` entry looks like:
 | `POW_COMMIT_TTL_SEC` | `number` | `120` | TTL for `__Host-pow_commit` (commit cookie). |
 | `POW_TICKET_TTL_SEC` | `number` | `600` | TTL for challenge tickets. |
 | `POW_SOL_TTL_SEC` | `number` | `600` | TTL for solution cookies (`__Host-pow_sol` / `__Host-turn_sol`). |
+| `POW_REPLAY_CACHE_REJECT` | `boolean` | `false` | If enabled, uses the edge Cache API to **hard-reject** replay attempts for `POST /__pow/turn` and the **final** `POST /__pow/open` (best-effort, non-atomic; may break retry-after-success). |
 | `POW_SOL_SLIDING` | `boolean` | `false` | Enable sliding renewal for solution cookies. |
 | `POW_SOL_RENEW_MAX` | `number` | `0` | Max renewal count (hard cap; signed). |
 | `POW_SOL_RENEW_WINDOW_SEC` | `number` | `300` | Only renew when `exp - now <= window`. |
