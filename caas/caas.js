@@ -1010,7 +1010,7 @@ const handleServerGenerate = async (request, url, nowSeconds, config) => {
   const spineK = clampInt(powReq.spineK ?? DEFAULTS.POW_SPINE_K, 0, 8);
   const rounds = clampInt(powReq.rounds ?? DEFAULTS.POW_CHAL_ROUNDS, 1, 64);
   const openBatch = clampInt(powReq.openBatch ?? DEFAULTS.POW_OPEN_BATCH, 1, 32);
-  const forceEdge1 = powReq.forceEdge1 ?? DEFAULTS.POW_FORCE_EDGE_1;
+  const forceEdge1 = true;
   const forceEdgeLast = powReq.forceEdgeLast ?? DEFAULTS.POW_FORCE_EDGE_LAST;
 
   const chalPayload = {
@@ -1030,7 +1030,7 @@ const handleServerGenerate = async (request, url, nowSeconds, config) => {
             spineK,
             rounds,
             openBatch,
-            forceEdge1: forceEdge1 === true,
+            forceEdge1,
             forceEdgeLast: forceEdgeLast === true || hashcashBits > 0,
           },
         }
