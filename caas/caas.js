@@ -1241,6 +1241,11 @@ const handleUiLanding = async (request, url, nowSeconds, config) => {
     }
   }
   const connectSrc = new Set(["'self'", "https://challenges.cloudflare.com"]);
+  for (const value of scriptSrc) {
+    if (typeof value === "string" && value.startsWith("http")) {
+      connectSrc.add(value);
+    }
+  }
   const frameSrc = new Set(["https://challenges.cloudflare.com"]);
   const imgSrc = new Set(["'self'", "data:", "https://challenges.cloudflare.com"]);
   const styleSrc = new Set(["'unsafe-inline'"]);
