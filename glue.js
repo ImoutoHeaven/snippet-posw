@@ -158,7 +158,12 @@ const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey, waitForPow)
       sitekey,
       theme: "dark",
       cData: ticketMac,
-      callback: (t) => tokenResolve && tokenResolve(t),
+      callback: (t) => {
+        if (el && !el.hidden) {
+          el.hidden = true;
+        }
+        if (tokenResolve) tokenResolve(t);
+      },
       "error-callback": () => tokenReject && tokenReject(new Error("Turnstile Failed")),
       "expired-callback": () => tokenReject && tokenReject(new Error("Turnstile Expired")),
     });

@@ -102,7 +102,10 @@ async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
       widgetId = globalThis.turnstile.render(container, {
         sitekey,
         cData: chalId,
-        callback: resolve,
+        callback: (token) => {
+          container.hidden = true;
+          resolve(token);
+        },
         "error-callback": () => reject(new Error("turnstile failed")),
         "expired-callback": () => reject(new Error("turnstile expired")),
       });
@@ -116,7 +119,6 @@ async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
       if (attempt >= maxAttempts) throw e;
       continue;
     }
-    container.hidden = true;
     const powProofToken = powPromise ? await powPromise : "";
     const body = { chal, turnstileToken: token };
     if (powPromise) body.powProofToken = powProofToken;
