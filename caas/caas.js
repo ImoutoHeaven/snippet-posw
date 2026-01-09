@@ -62,12 +62,12 @@ const CONFIG = {
   // Landing page dynamically imports this glue module (recommended: self-host or trusted CDN).
   // Example: "https://caas.example.com/assets/caas-glue.js"
   CAAS_GLUE_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@8b7c10211ba563eddd6eafbbdc8a8e1b8f1baa1c/caas/glue.js",
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@44fadd3a01e1c37f4bbd4a9bbd87e0667b890ab5/caas/glue.js",
 
   // PoW solver (computePoswCommit) module URL (recommended: self-host / pin the version).
   // Example: "https://caas.example.com/assets/esm.js"
   CAAS_POW_ESM_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@8b7c10211ba563eddd6eafbbdc8a8e1b8f1baa1c/caas/esm/esm.js",
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@44fadd3a01e1c37f4bbd4a9bbd87e0667b890ab5/caas/esm/esm.js",
 };
 
 const HTML_TEMPLATE = typeof __HTML_TEMPLATE__ === "string" ? __HTML_TEMPLATE__ : "";
