@@ -180,10 +180,10 @@ const runTurnstile = async (apiPrefix, ticketB64, pathHash, sitekey, waitForPow)
       }
       throw e;
     }
+    if (el && !el.hidden) {
+      el.hidden = true;
+    }
     if (waitForPow) {
-      if (el && !el.hidden) {
-        el.hidden = true;
-      }
       if (!waitedForPow) {
         log("Turnstile solved. Waiting for PoW...");
         waitedForPow = true;

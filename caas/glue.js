@@ -116,9 +116,7 @@ async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
       if (attempt >= maxAttempts) throw e;
       continue;
     }
-    if (powPromise) {
-      container.hidden = true;
-    }
+    container.hidden = true;
     const powProofToken = powPromise ? await powPromise : "";
     const body = { chal, turnstileToken: token };
     if (powPromise) body.powProofToken = powProofToken;
