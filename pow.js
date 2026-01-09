@@ -728,10 +728,18 @@ const makePowCommitMac = async (
     `commit|${ticketB64}|${rootB64}|${pathHash}|${nonce}|${exp}|${spineSeed}`
   );
 
-const SOL_TAG_POW = "sol-v4";
-const SOL_TAG_TURN = "turn-v4";
-const makeSolMacV4 = async (powSecret, tag, ticketB64, iat, last, n) =>
-  hmacSha256Base64UrlNoPad(powSecret, `${tag}|${ticketB64}|${iat}|${last}|${n}`);
+const SOL_TAG_POW = "sol-pow-v5";
+const SOL_TAG_TURN = "sol-turn-v5";
+const SOL_LINK_BYTES = 12; // 96-bit
+const SOL_LINK_B64_LEN = 16;
+
+const deriveSolLink = async (powSecret, ticketMac) => {
+  const bytes = await hmacSha256(powSecret, `sol-link-v1|${ticketMac}`);
+  return base64UrlEncodeNoPad(bytes.slice(0, SOL_LINK_BYTES));
+};
+
+const makeSolMacV5 = async (powSecret, tag, ticketB64, iat, last, n, link) =>
+  hmacSha256Base64UrlNoPad(powSecret, `${tag}|${ticketB64}|${iat}|${last}|${n}|${link}`);
 
 const makePowStateToken = async (
   powSecret,
@@ -879,17 +887,19 @@ const parsePowTicket = (ticketB64) => {
 const parsePowSolCookie = (value) => {
   if (!value || typeof value !== "string") return null;
   const parts = value.split(".");
-  if (parts.length !== 6 || parts[0] !== "v4") return null;
+  if (parts.length !== 7 || parts[0] !== "v5") return null;
   const ticketB64 = parts[1] || "";
   const iat = Number.parseInt(parts[2], 10);
   const last = Number.parseInt(parts[3], 10);
   const n = Number.parseInt(parts[4], 10);
-  const mac = parts[5] || "";
+  const link = parts[5] || "";
+  const mac = parts[6] || "";
   if (
     !ticketB64 ||
     !Number.isFinite(iat) ||
     !Number.isFinite(last) ||
     !Number.isFinite(n) ||
+    !link ||
     !mac
   ) {
     return null;
@@ -897,8 +907,9 @@ const parsePowSolCookie = (value) => {
   if (iat <= 0 || last <= 0 || n < 0) return null;
   if (last < iat) return null;
   if (!isBase64Url(ticketB64, 1, B64_TICKET_MAX_LEN)) return null;
+  if (!isBase64Url(link, SOL_LINK_B64_LEN, SOL_LINK_B64_LEN)) return null;
   if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
-  return { v: 4, ticketB64, iat, last, n, mac };
+  return { v: 5, ticketB64, iat, last, n, link, mac };
 };
 
 const parsePowCommitCookie = (value) => {
@@ -1002,7 +1013,15 @@ const verifySol = async (
   );
   const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
   if (!timingSafeEqual(expectedMac, ticket.mac)) return null;
-  const expectedSolMac = await makeSolMacV4(powSecret, solTag, sol.ticketB64, sol.iat, sol.last, sol.n);
+  const expectedSolMac = await makeSolMacV5(
+    powSecret,
+    solTag,
+    sol.ticketB64,
+    sol.iat,
+    sol.last,
+    sol.n,
+    sol.link
+  );
   if (!timingSafeEqual(expectedSolMac, sol.mac)) return null;
   return { sol, ticket, bindingValues };
 };
@@ -1018,11 +1037,11 @@ const maybeRenewSol = async (
   response,
   cookieName,
   solTag
-) => {
+  ) => {
   if (!meta || !meta.sol || !meta.bindingValues || !response) return response;
   if (config.POW_SOL_SLIDING !== true) return response;
   const sol = meta.sol;
-  if (sol.v !== 4) return response;
+  if (sol.v !== 5) return response;
 
   const renewMax = Math.max(
     0,
@@ -1092,8 +1111,18 @@ const maybeRenewSol = async (
   const ticketB64 = encodePowTicket(ticket);
 
   const nextN = sol.n + 1;
-  const mac = await makeSolMacV4(powSecret, solTag, ticketB64, sol.iat, nowSeconds, nextN);
-  const solValue = `v4.${ticketB64}.${sol.iat}.${nowSeconds}.${nextN}.${mac}`;
+  const link = typeof sol.link === "string" ? sol.link : "";
+  if (!isBase64Url(link, SOL_LINK_B64_LEN, SOL_LINK_B64_LEN)) return response;
+  const mac = await makeSolMacV5(
+    powSecret,
+    solTag,
+    ticketB64,
+    sol.iat,
+    nowSeconds,
+    nextN,
+    link
+  );
+  const solValue = `v5.${ticketB64}.${sol.iat}.${nowSeconds}.${nextN}.${link}.${mac}`;
 
   const headers = new Headers(response.headers);
   setCookie(headers, cookieName, solValue, newExp - nowSeconds);
@@ -1616,8 +1645,9 @@ const handleTurn = async (request, url, nowSeconds) => {
   solTicket.mac = await hmacSha256Base64UrlNoPad(powSecret, solBindingString);
   const solTicketB64 = encodePowTicket(solTicket);
   const iat = nowSeconds;
-  const solMac = await makeSolMacV4(powSecret, SOL_TAG_TURN, solTicketB64, iat, iat, 0);
-  const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
+  const link = await deriveSolLink(powSecret, ticket.mac);
+  const solMac = await makeSolMacV5(powSecret, SOL_TAG_TURN, solTicketB64, iat, iat, 0, link);
+  const solValue = `v5.${solTicketB64}.${iat}.${iat}.0.${link}.${solMac}`;
   const headers = new Headers();
   setCookie(headers, TURN_SOL_COOKIE, solValue, ttl);
   if (replayReject && turnTokenHash) {
@@ -2123,8 +2153,9 @@ const handlePowOpen = async (request, url, nowSeconds) => {
   solTicket.mac = await hmacSha256Base64UrlNoPad(powSecret, solBindingString);
   const solTicketB64 = encodePowTicket(solTicket);
   const iat = nowSeconds;
-  const solMac = await makeSolMacV4(powSecret, SOL_TAG_POW, solTicketB64, iat, iat, 0);
-  const solValue = `v4.${solTicketB64}.${iat}.${iat}.0.${solMac}`;
+  const link = await deriveSolLink(powSecret, ticket.mac);
+  const solMac = await makeSolMacV5(powSecret, SOL_TAG_POW, solTicketB64, iat, iat, 0, link);
+  const solValue = `v5.${solTicketB64}.${iat}.${iat}.0.${link}.${solMac}`;
   const headers = new Headers();
   setCookie(headers, DEFAULTS.POW_SOL_COOKIE, solValue, ttl);
   clearCookie(headers, DEFAULTS.POW_COMMIT_COOKIE);
@@ -2230,6 +2261,30 @@ export default {
           SOL_TAG_TURN
         )
       : null;
+    const needCombined = needPow && needTurn;
+    if (
+      needCombined &&
+      powMeta &&
+      turnMeta &&
+      powMeta.sol &&
+      turnMeta.sol &&
+      powMeta.sol.link !== turnMeta.sol.link
+    ) {
+      if (!isNavigationRequest(request)) {
+        return J({ code: "proof_mismatch" }, 403);
+      }
+      return respondPowChallengeHtml(
+        request,
+        url,
+        bindRes.canonicalPath,
+        nowSeconds,
+        config,
+        powSecret,
+        cfgId,
+        { needPow: true, needTurn: true }
+      );
+    }
+
     if ((!needPow || powMeta) && (!needTurn || turnMeta)) {
       let response = await fetch(bindRes.forwardRequest);
       response = await maybeRenewSol(
@@ -2272,7 +2327,9 @@ export default {
       config,
       powSecret,
       cfgId,
-      { needPow: needPow && !powMeta, needTurn: needTurn && !turnMeta }
+      needCombined
+        ? { needPow: true, needTurn: true }
+        : { needPow: needPow && !powMeta, needTurn: needTurn && !turnMeta }
     );
   },
 };
