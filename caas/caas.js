@@ -219,9 +219,13 @@ const NONCE_MAX_LEN = 64;
 const SID_LEN = 16;
 const TOKEN_MIN_LEN = 16;
 const TOKEN_MAX_LEN = 64;
+const TB_LEN = 16;
+const TURN_TOKEN_MIN_LEN = 20;
+const TURN_TOKEN_MAX_LEN = 4096;
 const SPINE_SEED_MIN_LEN = 16;
 const SPINE_SEED_MAX_LEN = 64;
 const MAX_PROOF_SIBS = 64;
+const CONTROL_CHAR_RE = /[\u0000-\u001F\u007F]/;
 
 const isBase64Url = (value, minLen, maxLen) => {
   if (typeof value !== "string") return false;
@@ -229,6 +233,9 @@ const isBase64Url = (value, minLen, maxLen) => {
   if (len < minLen || len > maxLen) return false;
   return BASE64URL_RE.test(value);
 };
+
+const isBase64UrlOrAny = (value, minLen, maxLen) =>
+  value === "any" || isBase64Url(value, minLen, maxLen);
 
 const normalizeNumber = (value, fallback) => {
   const num = Number(value);
@@ -291,6 +298,17 @@ const sha256Bytes = async (data) => {
   const buf = await crypto.subtle.digest("SHA-256", bytes);
   return new Uint8Array(buf);
 };
+
+const validateTurnToken = (value) => {
+  if (typeof value !== "string") return null;
+  const token = value.trim();
+  if (token.length < TURN_TOKEN_MIN_LEN || token.length > TURN_TOKEN_MAX_LEN) return null;
+  if (CONTROL_CHAR_RE.test(token)) return null;
+  return token;
+};
+
+const tbFromToken = async (token) =>
+  base64UrlEncodeNoPad((await sha256Bytes(token)).slice(0, 12));
 
 const getHmacKey = (secret) => {
   const key = typeof secret === "string" ? secret : "";
@@ -470,30 +488,37 @@ const makeState = async (powSecret, payload) => {
   return `s1.${payloadB64}.${mac}`;
 };
 
-const makeProofToken = async (powSecret, kind, chalId, iat, exp) => {
+const makeProofToken = async (powSecret, mask, chalId, iat, exp) => {
+  const m = Number(mask);
+  if (!Number.isFinite(m) || m < 0 || m > 3) {
+    throw new Error("invalid proof mask");
+  }
   const mac = await hmacSha256Base64UrlNoPad(
     powSecret,
-    `proof|${kind}|${chalId}|${iat}|${exp}`
+    `proof|${m}|${chalId}|${iat}|${exp}`
   );
-  return `p1.${kind}.${chalId}.${iat}.${exp}.${mac}`;
+  return `p1.${m}.${chalId}.${iat}.${exp}.${mac}`;
 };
 
-const verifyProofToken = async (powSecret, kind, token, chalId, nowSeconds) => {
+const verifyProofToken = async (powSecret, requiredMask, token, chalId, nowSeconds) => {
   const parts = String(token || "").split(".");
-  if (parts.length !== 6 || parts[0] !== "p1") return false;
-  if (parts[1] !== kind) return false;
-  if (parts[2] !== chalId) return false;
+  if (parts.length !== 6 || parts[0] !== "p1") return null;
+  if (parts[2] !== chalId) return null;
+  const m = Number.parseInt(parts[1], 10);
   const iat = Number.parseInt(parts[3], 10);
   const exp = Number.parseInt(parts[4], 10);
   const mac = parts[5] || "";
-  if (!Number.isFinite(iat) || !Number.isFinite(exp)) return false;
-  if (exp <= nowSeconds) return false;
-  if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return false;
+  if (!Number.isFinite(m) || m < 0 || m > 3) return null;
+  if (!Number.isFinite(iat) || !Number.isFinite(exp)) return null;
+  if (exp <= nowSeconds) return null;
+  if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
+  if ((m & requiredMask) !== requiredMask) return null;
   const expected = await hmacSha256Base64UrlNoPad(
     powSecret,
-    `proof|${kind}|${chalId}|${iat}|${exp}`
+    `proof|${m}|${chalId}|${iat}|${exp}`
   );
-  return timingSafeEqual(expected, mac);
+  if (!timingSafeEqual(expected, mac)) return null;
+  return { mask: m, iat, exp };
 };
 
 const buildLandingHtml = (config, cfgObj, scriptNonce) => {
@@ -889,10 +914,10 @@ const verifyMerkleProof = async (rootBytes, leafBytes, leafIndex, leafCount, pro
   return bytesEqual(current, rootBytes);
 };
 
-const makePowCommitMac = async (powSecret, chalId, rootB64, nonce, exp, spineSeed) =>
+const makePowCommitMac = async (powSecret, chalId, rootB64, tb, nonce, exp, spineSeed) =>
   hmacSha256Base64UrlNoPad(
     powSecret,
-    `pow-commit-v1|${chalId}|${rootB64}|${nonce}|${exp}|${spineSeed}`
+    `pow-commit-v1|${chalId}|${rootB64}|${tb}|${nonce}|${exp}|${spineSeed}`
   );
 
 const makePowCommitToken = async (powSecret, payload) => {
@@ -1061,14 +1086,13 @@ const handleServerAttest = async (request, nowSeconds, config) => {
 
   const requireTurn = policy.requireTurn === true;
   const requirePow = policy.requirePow === true;
-
-  if (requireTurn) {
-    const token = typeof body.turnProofToken === "string" ? body.turnProofToken : "";
-    if (!(await verifyProofToken(powSecret, "turn", token, chalId, nowSeconds))) return deny();
-  }
-  if (requirePow) {
-    const token = typeof body.powProofToken === "string" ? body.powProofToken : "";
-    if (!(await verifyProofToken(powSecret, "pow", token, chalId, nowSeconds))) return deny();
+  const requiredMask = (requirePow ? 1 : 0) | (requireTurn ? 2 : 0);
+  if (requiredMask) {
+    const proofToken = typeof body.proofToken === "string" ? body.proofToken : "";
+    if (!proofToken) return deny();
+    if (!(await verifyProofToken(powSecret, requiredMask, proofToken, chalId, nowSeconds))) {
+      return deny();
+    }
   }
 
   const aad = utf8ToBytes(
@@ -1103,6 +1127,8 @@ const handleClientTurn = async (request, nowSeconds, config) => {
   const chal = typeof body.chal === "string" ? body.chal : "";
   const turnstileToken = typeof body.turnstileToken === "string" ? body.turnstileToken : "";
   if (!chal || !turnstileToken) return S(400, headers);
+  const turnToken = validateTurnToken(turnstileToken);
+  if (!turnToken) return S(400, headers);
 
   const parsed = await parseChal(powSecret, chal);
   if (!parsed) return J({ ok: false }, 403, headers);
@@ -1110,16 +1136,11 @@ const handleClientTurn = async (request, nowSeconds, config) => {
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
   if (!(payload.policy && payload.policy.requireTurn === true)) return J({ ok: false }, 403, headers);
   const requirePow = payload.policy && payload.policy.requirePow === true;
-  if (requirePow) {
-    const powProofToken = typeof body.powProofToken === "string" ? body.powProofToken : "";
-    if (!(await verifyProofToken(powSecret, "pow", powProofToken, chalId, nowSeconds))) {
-      return J({ ok: false }, 403, headers);
-    }
-  }
+  if (requirePow) return S(404, headers);
 
   const form = new URLSearchParams();
   form.set("secret", config.TURNSTILE_SECRET);
-  form.set("response", turnstileToken);
+  form.set("response", turnToken);
 
   let verifyRes;
   try {
@@ -1139,9 +1160,9 @@ const handleClientTurn = async (request, nowSeconds, config) => {
   const ttl = Math.max(1, Math.min(clampInt(config.PROOF_TTL_SEC ?? DEFAULTS.PROOF_TTL_SEC, 30, 3600), Number(payload.exp) - nowSeconds));
   const iat = nowSeconds;
   const exp = nowSeconds + ttl;
-  const turnProofToken = await makeProofToken(powSecret, "turn", chalId, iat, exp);
+  const proofToken = await makeProofToken(powSecret, 2, chalId, iat, exp);
 
-  return J({ ok: true, turnProofToken, exp }, 200, headers);
+  return J({ ok: true, proofToken, exp }, 200, headers);
 };
 
 const handleUiLanding = async (request, url, nowSeconds, config) => {
@@ -1244,6 +1265,7 @@ const handleClientPowCommit = async (request, nowSeconds, config) => {
   const chal = typeof body.chal === "string" ? body.chal : "";
   const rootB64 = typeof body.rootB64 === "string" ? body.rootB64 : "";
   const nonce = typeof body.nonce === "string" ? body.nonce : "";
+  const turnTokenRaw = typeof body.turnToken === "string" ? body.turnToken : "";
   if (!chal || !rootB64 || !nonce) return S(400, headers);
 
   if (!isBase64Url(rootB64, 1, B64_HASH_MAX_LEN) || !isBase64Url(nonce, NONCE_MIN_LEN, NONCE_MAX_LEN)) {
@@ -1259,7 +1281,13 @@ const handleClientPowCommit = async (request, nowSeconds, config) => {
   const { payload, chalId } = parsed;
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
   if (!(payload.policy && payload.policy.requirePow === true)) return J({ ok: false }, 403, headers);
+  const requireTurn = payload.policy && payload.policy.requireTurn === true;
   if (!(payload.pow && payload.pow.enabled === true && payload.pow.params)) return J({ ok: false }, 403, headers);
+  let turnToken = "";
+  if (requireTurn) {
+    turnToken = validateTurnToken(turnTokenRaw);
+    if (!turnToken) return S(400, headers);
+  }
 
   const params = payload.pow.params;
   const L = clampInt(params.steps, DEFAULTS.POW_MIN_STEPS, DEFAULTS.POW_MAX_STEPS);
@@ -1281,11 +1309,21 @@ const handleClientPowCommit = async (request, nowSeconds, config) => {
   if (commitExp <= nowSeconds) return J({ ok: false }, 403, headers);
 
   const spineSeed = randomBase64Url(16);
-  const commitMac = await makePowCommitMac(powSecret, chalId, rootB64, nonce, commitExp, spineSeed);
+  const tb = requireTurn ? await tbFromToken(turnToken) : "any";
+  const commitMac = await makePowCommitMac(
+    powSecret,
+    chalId,
+    rootB64,
+    tb,
+    nonce,
+    commitExp,
+    spineSeed
+  );
   const commitToken = await makePowCommitToken(powSecret, {
     v: 1,
     chalId,
     rootB64,
+    tb,
     nonce,
     exp: commitExp,
     spineSeed,
@@ -1346,21 +1384,23 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
   const commitToken = typeof body.commitToken === "string" ? body.commitToken : "";
   const sid = typeof body.sid === "string" ? body.sid : "";
   const cursor = Number.parseInt(body.cursor, 10);
-  const token = typeof body.token === "string" ? body.token : "";
+  const stateToken = typeof body.token === "string" ? body.token : "";
+  const turnTokenRaw = typeof body.turnToken === "string" ? body.turnToken : "";
   const opens = Array.isArray(body.opens) ? body.opens : null;
   const spinePosRaw = body.spinePos;
 
-  if (!chal || !commitToken || !sid || !token || !opens || !Number.isFinite(cursor) || cursor < 0) {
+  if (!chal || !commitToken || !sid || !stateToken || !opens || !Number.isFinite(cursor) || cursor < 0) {
     return S(400, headers);
   }
   if (!Array.isArray(spinePosRaw)) return S(400, headers);
-  if (!isBase64Url(sid, SID_LEN, SID_LEN) || !isBase64Url(token, TOKEN_MIN_LEN, TOKEN_MAX_LEN)) return S(400, headers);
+  if (!isBase64Url(sid, SID_LEN, SID_LEN) || !isBase64Url(stateToken, TOKEN_MIN_LEN, TOKEN_MAX_LEN)) return S(400, headers);
 
   const parsedChal = await parseChal(powSecret, chal);
   if (!parsedChal) return J({ ok: false }, 403, headers);
   const { payload, chalId } = parsedChal;
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
   if (!(payload.policy && payload.policy.requirePow === true)) return J({ ok: false }, 403, headers);
+  const requireTurn = payload.policy && payload.policy.requireTurn === true;
   if (!(payload.pow && payload.pow.enabled === true && payload.pow.params)) return J({ ok: false }, 403, headers);
 
   const commit = await parsePowCommitToken(powSecret, commitToken);
@@ -1370,13 +1410,18 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
   if (!Number.isFinite(commitExp) || commitExp <= nowSeconds) return J({ ok: false }, 403, headers);
 
   const rootB64 = String(commit.rootB64 || "");
+  const tb = String(commit.tb || "");
   const nonce = String(commit.nonce || "");
   const spineSeed = String(commit.spineSeed || "");
   if (
     !isBase64Url(rootB64, 1, B64_HASH_MAX_LEN) ||
+    !isBase64UrlOrAny(tb, TB_LEN, TB_LEN) ||
     !isBase64Url(nonce, NONCE_MIN_LEN, NONCE_MAX_LEN) ||
     !isBase64Url(spineSeed, SPINE_SEED_MIN_LEN, SPINE_SEED_MAX_LEN)
   ) {
+    return J({ ok: false }, 403, headers);
+  }
+  if (requireTurn && !isBase64Url(tb, TB_LEN, TB_LEN)) {
     return J({ ok: false }, 403, headers);
   }
 
@@ -1398,11 +1443,11 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
   const spinePos = normalizeSpinePosList(spinePosRaw, openBatch);
   if (!spinePos) return S(400, headers);
 
-  const commitMac = await makePowCommitMac(powSecret, chalId, rootB64, nonce, commitExp, spineSeed);
+  const commitMac = await makePowCommitMac(powSecret, chalId, rootB64, tb, nonce, commitExp, spineSeed);
   const sidExpected = await derivePowSid(powSecret, chalId, commitMac);
   if (sid !== sidExpected) return J({ ok: false }, 403, headers);
   const expectedToken = await makePowStateToken(powSecret, chalId, sidExpected, commitMac, cursor, openBatch, spinePos);
-  if (!timingSafeEqual(expectedToken, token)) return J({ ok: false }, 403, headers);
+  if (!timingSafeEqual(expectedToken, stateToken)) return J({ ok: false }, 403, headers);
 
   const seed16 = await derivePowPlanSeedBytes16(powSecret, chalId, powSeed);
   const rng = makeXoshiro128ss(seed16);
@@ -1484,7 +1529,8 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
   if (leafCount < 2) return J({ ok: false }, 403, headers);
 
   const bindingString = `chalId=${chalId}`;
-  const seedHash = await hashPoswSeed(bindingString, nonce);
+  const powBindingString = requireTurn ? `${bindingString}&tb=${tb}` : bindingString;
+  const seedHash = await hashPoswSeed(powBindingString, nonce);
 
   for (const entry of batch) {
     const idx = entry.idx;
@@ -1568,12 +1614,40 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
     }, 200, headers);
   }
 
+  if (requireTurn) {
+    const turnSecret = typeof config.TURNSTILE_SECRET === "string" ? config.TURNSTILE_SECRET : "";
+    if (!turnSecret) return S(500, headers);
+    const turnToken = validateTurnToken(turnTokenRaw);
+    if (!turnToken) return J({ ok: false }, 403, headers);
+    const tbCheck = await tbFromToken(turnToken);
+    if (tbCheck !== tb) return J({ ok: false }, 403, headers);
+
+    const form = new URLSearchParams();
+    form.set("secret", turnSecret);
+    form.set("response", turnToken);
+    let verifyRes;
+    try {
+      verifyRes = await fetch(TURNSTILE_SITEVERIFY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: form,
+      });
+    } catch {
+      return J({ ok: false }, 403, headers);
+    }
+    const verify = await verifyRes.json().catch(() => null);
+    if (!verify || verify.success !== true) return J({ ok: false }, 403, headers);
+    const cdata = typeof verify.cdata === "string" ? verify.cdata : "";
+    if (cdata !== chalId) return J({ ok: false }, 403, headers);
+  }
+
   const proofTtl = clampInt(config.PROOF_TTL_SEC ?? DEFAULTS.PROOF_TTL_SEC, 30, 3600);
   const ttl = Math.max(1, Math.min(proofTtl, Number(payload.exp) - nowSeconds));
   const iat = nowSeconds;
   const exp = nowSeconds + ttl;
-  const powProofToken = await makeProofToken(powSecret, "pow", chalId, iat, exp);
-  return J({ done: true, powProofToken, exp }, 200, headers);
+  const mask = requireTurn ? 3 : 1;
+  const proofToken = await makeProofToken(powSecret, mask, chalId, iat, exp);
+  return J({ done: true, proofToken, exp }, 200, headers);
 };
 
 export default {

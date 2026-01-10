@@ -11,6 +11,18 @@ const b64uDecode = (value) => {
 
 const b64uDecodeUtf8 = (value) => new TextDecoder().decode(b64uDecode(value));
 
+const base64UrlEncodeNoPad = (bytes) =>
+  btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+
+const sha256Bytes = async (value) => {
+  const bytes = encoder.encode(String(value ?? ""));
+  const buf = await crypto.subtle.digest("SHA-256", bytes);
+  return new Uint8Array(buf);
+};
+
+const tbFromToken = async (token) =>
+  base64UrlEncodeNoPad((await sha256Bytes(token)).slice(0, 12));
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // --- UI Logic (Aligned with Gate glue.js) ---
@@ -150,7 +162,7 @@ const readChalFromFragment = () => {
   }
 };
 
-async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
+async function runTurnstile({ chalId, sitekey, submitToken }) {
   log("Loading Turnstile...");
   await loadTurnstile();
   const container = ui.tsEl;
@@ -159,14 +171,16 @@ async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
   let widgetId = null;
   const nextToken = () =>
     new Promise((resolve, reject) => {
-      container.style.display = "block";
-      container.innerHTML = "";
+      if (container) {
+        container.style.display = "block";
+        container.innerHTML = "";
+      }
       widgetId = globalThis.turnstile.render(container, {
         sitekey,
         cData: chalId,
         theme: "dark",
         callback: (token) => {
-          container.style.display = "none";
+          if (container) container.style.display = "none";
           resolve(token);
         },
         "error-callback": () => reject(new Error("turnstile failed")),
@@ -183,38 +197,31 @@ async function solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise }) {
       if (attempt >= maxAttempts) throw e;
       continue;
     }
-    const powProofToken = powPromise ? await powPromise : "";
-    const body = { chal, turnstileToken: token };
-    if (powPromise) body.powProofToken = powProofToken;
-    const submitLine = log("Submitting Turnstile...");
-    const res = await fetch(`${apiPrefix}/client/turn`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const j = await res.json().catch(() => null);
-    if (res.ok && j && j.ok === true && typeof j.turnProofToken === "string") {
-      update(submitLine, "Submitting Turnstile... done");
-      if (powPromise) {
-        container.style.display = "none";
+    const submitLine = submitToken ? log("Submitting Turnstile...") : -1;
+    try {
+      const result = submitToken ? await submitToken(token) : token;
+      if (submitLine !== -1) update(submitLine, "Submitting Turnstile... done");
+      if (container) container.style.display = "none";
+      return result;
+    } catch (e) {
+      if (submitToken && e && e.message === "403") {
+        update(submitLine, "Turnstile rejected. Retrying...");
+        if (attempt >= maxAttempts) throw new Error("turn attest failed");
+        if (container) container.style.display = "block";
+        if (globalThis.turnstile && typeof globalThis.turnstile.reset === "function") {
+          try {
+            globalThis.turnstile.reset(widgetId);
+          } catch {}
+        }
+        continue;
       }
-      return j.turnProofToken;
-    }
-    update(submitLine, "Turnstile rejected. Retrying...");
-    if (attempt >= maxAttempts) {
-      throw new Error("turn attest failed");
-    }
-    container.style.display = "block";
-    if (globalThis.turnstile && typeof globalThis.turnstile.reset === "function") {
-      try {
-        globalThis.turnstile.reset(widgetId);
-      } catch {}
+      throw e;
     }
   }
   throw new Error("turn attest failed");
 }
 
-async function solvePow({ apiPrefix, chal, chalId, powEsmUrl }) {
+async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
   const payload = parseChalPayload(chal);
   const pow = payload && payload.pow;
   const powEnabled = pow && pow.enabled === true;
@@ -231,7 +238,10 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl }) {
     throw new Error("computePoswCommit missing");
   }
 
-  const bindingString = `chalId=${chalId}`;
+  const bindingBase = `chalId=${chalId}`;
+  const bindingString = turnToken
+    ? `${bindingBase}&tb=${await tbFromToken(turnToken)}`
+    : bindingBase;
   const hashcashBits = Number(params && params.hashcashBits) || 0;
   const segmentLen = 64;
 
@@ -270,6 +280,7 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl }) {
         chal,
         rootB64: commit.rootB64,
         nonce: commit.nonce,
+        turnToken: turnToken || "",
       }),
     });
     let state = await commitRes.json().catch(() => null);
@@ -295,6 +306,7 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl }) {
           token: state.token,
           spinePos: state.spinePos,
           opens,
+          turnToken: turnToken || "",
         }),
       });
       state = await openRes.json().catch(() => null);
@@ -303,10 +315,10 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl }) {
     }
     if (verifyLine !== -1) update(verifyLine, "Verifying... done");
 
-    if (!state || state.done !== true || typeof state.powProofToken !== "string") {
+    if (!state || state.done !== true || typeof state.proofToken !== "string") {
       throw new Error("pow solve failed");
     }
-    return state.powProofToken;
+    return state.proofToken;
   } finally {
     clearInterval(spinTimer);
   }
@@ -380,25 +392,39 @@ export default async function main(cfgB64) {
   const proof = { chalId, nonce };
 
   try {
-    const powPromise = requirePow
-      ? (() => {
-          if (!powEsmUrl) throw new Error("pow esm url missing");
-          return solvePow({ apiPrefix, chal, chalId, powEsmUrl });
-        })()
-      : null;
-    const turnPromise = requireTurn
-      ? (() => {
-          if (!sitekey) throw new Error("turn sitekey missing");
-          return solveTurn({ apiPrefix, chal, chalId, sitekey, powPromise });
-        })()
-      : null;
-
-    if (powPromise) {
-      proof.powProofToken = await powPromise;
+    let proofToken = "";
+    if (requirePow && requireTurn) {
+      if (!sitekey) throw new Error("turn sitekey missing");
+      if (!powEsmUrl) throw new Error("pow esm url missing");
+      const turnToken = await runTurnstile({ chalId, sitekey });
+      log("Turnstile solved. Starting PoW...");
+      proofToken = await solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken });
+    } else if (requirePow) {
+      if (!powEsmUrl) throw new Error("pow esm url missing");
+      proofToken = await solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken: "" });
+    } else if (requireTurn) {
+      if (!sitekey) throw new Error("turn sitekey missing");
+      proofToken = await runTurnstile({
+        chalId,
+        sitekey,
+        submitToken: async (token) => {
+          const res = await fetch(`${apiPrefix}/client/turn`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ chal, turnstileToken: token }),
+          });
+          const j = await res.json().catch(() => null);
+          if (res.ok && j && j.ok === true && typeof j.proofToken === "string") {
+            return j.proofToken;
+          }
+          if (res.status === 403) throw new Error("403");
+          throw new Error("turn attest failed");
+        },
+      });
+    } else {
+      throw new Error("no challenge");
     }
-    if (turnPromise) {
-      proof.turnProofToken = await turnPromise;
-    }
+    proof.proofToken = proofToken;
   } catch (e) {
     setStatus(false);
     log("Error: " + (e && e.message ? e.message : String(e)));
@@ -417,8 +443,7 @@ export default async function main(cfgB64) {
     log("Redirecting...");
     const url = new URL(returnUrl);
     url.hash = new URLSearchParams({
-      turn: proof.turnProofToken || "",
-      pow: proof.powProofToken || "",
+      proof: proof.proofToken || "",
     }).toString();
     window.location.replace(url.toString());
     return;
