@@ -22,6 +22,10 @@ const DEFAULTS = {
   CHAL_TTL_SEC: 300,
   STATE_TTL_SEC: 300,
   PROOF_TTL_SEC: 600,
+  CTX_B64_MAX_LEN: 32768,
+  CHAL_B64_MAX_LEN: 65536,
+  STATE_B64_MAX_LEN: 4096,
+  LANDING_CHAL_MAX_LEN: 4096,
 
   POW_STEPS: 2048,
   POW_MIN_STEPS: 512,
@@ -393,6 +397,27 @@ const clampInt = (value, lo, hi) => {
   return Math.max(lo, Math.min(hi, Math.floor(num)));
 };
 
+const normalizeMaxLen = (value, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(1, Math.floor(num));
+};
+
+const normalizeMaxLenAllowZero = (value, fallback) => {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.max(0, Math.floor(num));
+};
+
+const getCtxB64MaxLen = (config) =>
+  normalizeMaxLen(config?.CTX_B64_MAX_LEN, DEFAULTS.CTX_B64_MAX_LEN);
+const getChalB64MaxLen = (config) =>
+  normalizeMaxLen(config?.CHAL_B64_MAX_LEN, DEFAULTS.CHAL_B64_MAX_LEN);
+const getStateB64MaxLen = (config) =>
+  normalizeMaxLen(config?.STATE_B64_MAX_LEN, DEFAULTS.STATE_B64_MAX_LEN);
+const getLandingChalMaxLen = (config) =>
+  normalizeMaxLenAllowZero(config?.LANDING_CHAL_MAX_LEN, DEFAULTS.LANDING_CHAL_MAX_LEN);
+
 const normalizeOrigin = (raw) => {
   if (typeof raw !== "string") return null;
   let url;
@@ -446,12 +471,12 @@ const requireAuth = (request, config) => {
   return timingSafeEqual(got, want);
 };
 
-const parseChal = async (powSecret, chal) => {
+const parseChal = async (powSecret, chal, payloadMaxLen = DEFAULTS.CHAL_B64_MAX_LEN) => {
   const parts = String(chal || "").split(".");
   if (parts.length !== 3 || parts[0] !== "c1") return null;
   const payloadB64 = parts[1] || "";
   const mac = parts[2] || "";
-  if (!isBase64Url(payloadB64, 1, B64_TICKET_MAX_LEN)) return null;
+  if (!isBase64Url(payloadB64, 1, payloadMaxLen)) return null;
   if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
   const expected = await hmacSha256Base64UrlNoPad(powSecret, `chal|${payloadB64}`);
   if (!timingSafeEqual(expected, mac)) return null;
@@ -470,12 +495,12 @@ const makeChal = async (powSecret, payload) => {
   return { chal: `c1.${payloadB64}.${mac}`, chalId, payloadB64 };
 };
 
-const parseState = async (powSecret, state) => {
+const parseState = async (powSecret, state, payloadMaxLen = DEFAULTS.STATE_B64_MAX_LEN) => {
   const parts = String(state || "").split(".");
   if (parts.length !== 3 || parts[0] !== "s1") return null;
   const payloadB64 = parts[1] || "";
   const mac = parts[2] || "";
-  if (!isBase64Url(payloadB64, 1, B64_TICKET_MAX_LEN)) return null;
+  if (!isBase64Url(payloadB64, 1, payloadMaxLen)) return null;
   if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
   const expected = await hmacSha256Base64UrlNoPad(powSecret, `state|${payloadB64}`);
   if (!timingSafeEqual(expected, mac)) return null;
@@ -949,7 +974,8 @@ const handleServerGenerate = async (request, url, nowSeconds, config) => {
   if (!powSecret) return S(500);
 
   const ctxB64 = typeof body.ctxB64 === "string" ? body.ctxB64 : "";
-  if (!isBase64Url(ctxB64, 1, B64_TICKET_MAX_LEN)) return S(400);
+  const ctxMaxLen = getCtxB64MaxLen(config);
+  if (!isBase64Url(ctxB64, 1, ctxMaxLen)) return S(400);
   const ctxBytes = base64UrlDecodeToBytes(ctxB64);
   if (!ctxBytes) return S(400);
 
@@ -1029,7 +1055,11 @@ const handleServerGenerate = async (request, url, nowSeconds, config) => {
     ctxEnc,
   };
 
-  const { chal, chalId } = await makeChal(powSecret, chalPayload);
+  const { chal, chalId, payloadB64 } = await makeChal(powSecret, chalPayload);
+  const chalMaxLen = getChalB64MaxLen(config);
+  if (payloadB64.length > chalMaxLen) {
+    return J({ ok: false, error: "chal too large" }, 400);
+  }
 
   let ui = { enabled: false };
   if (uiEnabled) {
@@ -1045,7 +1075,8 @@ const handleServerGenerate = async (request, url, nowSeconds, config) => {
     const landingUrl = `${url.origin}${config.API_PREFIX}/ui/landing?state=${encodeURIComponent(state)}`;
 
     let landingUrlRedirect = null;
-    if (allowRedirect && returnUrl) {
+    const landingChalMaxLen = getLandingChalMaxLen(config);
+    if (allowRedirect && returnUrl && landingChalMaxLen > 0 && chal.length <= landingChalMaxLen) {
       landingUrlRedirect = `${url.origin}${config.API_PREFIX}/ui/landing?state=${encodeURIComponent(
         state
       )}#chal=${encodeURIComponent(chal)}`;
@@ -1077,7 +1108,7 @@ const handleServerAttest = async (request, nowSeconds, config) => {
   if (!powSecret) return S(500);
 
   const chal = typeof body.chal === "string" ? body.chal : "";
-  const parsed = await parseChal(powSecret, chal);
+  const parsed = await parseChal(powSecret, chal, getChalB64MaxLen(config));
   if (!parsed) return deny();
   const { payload, payloadB64, chalId } = parsed;
   const exp = Number(payload.exp);
@@ -1130,7 +1161,7 @@ const handleClientTurn = async (request, nowSeconds, config) => {
   const turnToken = validateTurnToken(turnstileToken);
   if (!turnToken) return S(400, headers);
 
-  const parsed = await parseChal(powSecret, chal);
+  const parsed = await parseChal(powSecret, chal, getChalB64MaxLen(config));
   if (!parsed) return J({ ok: false }, 403, headers);
   const { payload, chalId } = parsed;
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
@@ -1171,7 +1202,7 @@ const handleUiLanding = async (request, url, nowSeconds, config) => {
 
   const state = url.searchParams.get("state") || "";
   if (!state) return S(400);
-  const payload = await parseState(powSecret, state);
+  const payload = await parseState(powSecret, state, getStateB64MaxLen(config));
   if (!payload) return deny();
 
   const exp = Number(payload.exp);
@@ -1276,7 +1307,7 @@ const handleClientPowCommit = async (request, nowSeconds, config) => {
     return S(400, headers);
   }
 
-  const parsed = await parseChal(powSecret, chal);
+  const parsed = await parseChal(powSecret, chal, getChalB64MaxLen(config));
   if (!parsed) return J({ ok: false }, 403, headers);
   const { payload, chalId } = parsed;
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
@@ -1395,7 +1426,7 @@ const handleClientPowOpen = async (request, nowSeconds, config) => {
   if (!Array.isArray(spinePosRaw)) return S(400, headers);
   if (!isBase64Url(sid, SID_LEN, SID_LEN) || !isBase64Url(stateToken, TOKEN_MIN_LEN, TOKEN_MAX_LEN)) return S(400, headers);
 
-  const parsedChal = await parseChal(powSecret, chal);
+  const parsedChal = await parseChal(powSecret, chal, getChalB64MaxLen(config));
   if (!parsedChal) return J({ ok: false }, 403, headers);
   const { payload, chalId } = parsedChal;
   if (Number(payload.exp) <= nowSeconds) return J({ ok: false }, 403, headers);
