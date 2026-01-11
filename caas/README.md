@@ -1,15 +1,23 @@
 # snippets-caas
 
-Challenge-as-a-Service (CaaS) for Cloudflare Snippets/Workers.
+Challenge-as-a-Service (CaaS) for Cloudflare **Snippets / Workers**.
 
-## What it does
+This project provides a separate-domain challenge service (e.g. `caas.example.com`) that:
 
-- Designed for **separate-domain deployment** (e.g. `caas.example.com`) and backend-driven integration.
-- Stateless tokens:
-  - `chal` / `state` / `proofToken` are verified via HMAC.
-  - `ctx` is sealed with AES-GCM and returned only after successful attestation.
-- UI flow is **postMessage-first** (iframe/popup) with **redirect fallback**.
-- Policies supported: Turnstile only, PoW only, or Turnstile + PoW.
+- Issues stateless challenge tokens (`chal`, `state`, `proofToken`) via HMAC.
+- Seals arbitrary application context (`ctx`) with AES-GCM and returns it only after successful attestation.
+- Uses **postMessage-first** UI with **redirect fallback**.
+- Supports **Turnstile-only**, **PoW-only**, or **combined** mode.
+
+## Files
+
+- `caas.js`: CaaS snippet/worker implementation.
+- `template.html`: minimal landing HTML template (inlined into `caas.js` by the build).
+- `glue.js`: landing frontend (postMessage handshake, Turnstile, optional PoW).
+- `frontend/caas-client.js`: browser helper for embedding the landing page and exchanging messages.
+- `sdk/node.js`: Node.js (18+) server SDK for calling `server/*`.
+- `examples/node-demo.mjs`: minimal end-to-end demo (local backend + static page).
+- `build.mjs`: build script (outputs `dist/caas_snippet.js`, checks the 32KB snippet limit).
 
 ## Configuration
 
@@ -18,13 +26,52 @@ Configure `CONFIG` in `caas.js`:
 - Single-site: set `CONFIG` to an object.
 - Multi-site: set `CONFIG` to an array of `{ pattern, config }` entries (first-match-wins; pattern syntax matches the Gate snippet).
 
-- `API_PREFIX`: API/UI prefix (default: `/__pow/v1`). Can be set per-site in multi-site mode.
-- `POW_TOKEN`: master secret used for HMAC + AES-GCM key derivation (required).
-- `SERVICE_TOKEN`: bearer token for `POST {API_PREFIX}/server/*` (required).
-- `TURNSTILE_SITEKEY` / `TURNSTILE_SECRET`: required when `requireTurn: true`.
-- `ALLOWED_PARENT_ORIGINS`: allowlist for embedding + postMessage validation (required for UI usage).
-- `CAAS_GLUE_URL`: ES module URL for the landing page glue code (required for UI).
-- `CAAS_POW_ESM_URL`: ES module URL for the PoW solver (required when `requirePow: true`).
+### `pattern` syntax
+
+| Field | Type | Description |
+|---|---|---|
+| `pattern` | `string` | Host pattern with optional path glob: `host` or `host/path`. Host `*` matches a single label fragment (does not cross `.`). Path supports `*` (no `/`) and `**` (may include `/`). |
+
+### `config` keys (all supported)
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `API_PREFIX` | `string` | `"/__pow/v1"` | API/UI prefix. Can be set per-site in multi-site mode. |
+| `POW_TOKEN` | `string` | — | Master secret used for HMAC + AES-GCM key derivation. Required. |
+| `SERVICE_TOKEN` | `string` | — | Bearer token for `POST {API_PREFIX}/server/*`. Required. |
+| `TURNSTILE_SITEKEY` | `string` | — | Turnstile site key (client-side). Required when `requireTurn: true`. |
+| `TURNSTILE_SECRET` | `string` | — | Turnstile secret key (server-side `siteverify`). Required when `requireTurn: true`. |
+| `ALLOWED_PARENT_ORIGINS` | `string[]` | `[]` | Allowlist for embedding + postMessage origin checks (required for UI usage). |
+| `ALLOWED_CLIENT_ORIGINS` | `string[]` | `[]` | Optional CORS allowlist for `/client/*` calls. |
+| `CAAS_GLUE_URL` | `string` | (repo-pinned) | ES module URL for landing UI glue (required for UI). |
+| `CAAS_POW_ESM_URL` | `string` | (repo-pinned) | ES module URL for the PoW solver (required when `requirePow: true`). |
+| `CHAL_TTL_SEC` | `number` | `300` | TTL for `chal` tokens. |
+| `STATE_TTL_SEC` | `number` | `300` | TTL for UI state tokens. |
+| `PROOF_TTL_SEC` | `number` | `600` | TTL for proof tokens. |
+| `CTX_B64_MAX_LEN` | `number` | `32768` | Max length of `ctxB64` input (base64url). |
+| `CHAL_B64_MAX_LEN` | `number` | `65536` | Max length of `chal` payload (base64url). |
+| `STATE_B64_MAX_LEN` | `number` | `4096` | Max length of `state` payload (base64url). |
+| `LANDING_CHAL_MAX_LEN` | `number` | `4096` | Max `chal` length allowed in redirect hash (`0` disables hash). |
+| `POW_STEPS` | `number` | `2048` | Default PoW steps. |
+| `POW_MIN_STEPS` | `number` | `512` | Min PoW steps (clamp). |
+| `POW_MAX_STEPS` | `number` | `8192` | Max PoW steps (clamp). |
+| `POW_HASHCASH_BITS` | `number` | `3` | Root-bound hashcash bits (0 disables). |
+| `POW_SEGMENT_LEN` | `string | number` | `"48-64"` | Segment length spec. |
+| `POW_SAMPLE_K` | `number` | `15` | Extra sampled indices per round. |
+| `POW_SPINE_K` | `number` | `2` | Spine constraints per batch. |
+| `POW_CHAL_ROUNDS` | `number` | `12` | Challenge rounds. |
+| `POW_OPEN_BATCH` | `number` | `15` | Indices per `/open` batch. |
+| `POW_FORCE_EDGE_1` | `boolean` | `true` | Force index `1` in sampling. |
+| `POW_FORCE_EDGE_LAST` | `boolean` | `true` | Force last index in sampling. |
+| `POW_COMMIT_TTL_SEC` | `number` | `300` | TTL for PoW commit tokens. |
+
+## Token model
+
+- **chal**: `c1.<payloadB64>.<mac>`
+- **state**: `s1.<payloadB64>.<mac>`
+- **proofToken**: `p1.<m>.<chalId>.<iat>.<exp>.<mac>`
+  - `m` mask: `1=pow`, `2=turn`, `3=pow+turn`
+- **ctx**: AES-GCM sealed payload carried in `chal` and returned only after successful attestation.
 
 ## Endpoints (v1)
 
@@ -34,17 +81,38 @@ Default `API_PREFIX` is `/__pow/v1` (configurable via `CONFIG.API_PREFIX`).
   - `POST {API_PREFIX}/server/generate`
   - `POST {API_PREFIX}/server/attest`
 - Client/UI:
-  - `POST {API_PREFIX}/client/turn`
+  - `POST {API_PREFIX}/client/turn` (turn-only mode)
   - `POST {API_PREFIX}/client/pow/commit`
   - `POST {API_PREFIX}/client/pow/open`
   - `GET {API_PREFIX}/ui/landing?state=...`
+
+### Mode rules
+
+- **Turn-only**: `requireTurn=true`, `requirePow=false`
+  - Uses `/client/turn` → returns `proofToken (m=2)`.
+- **PoW-only**: `requirePow=true`, `requireTurn=false`
+  - Uses `/client/pow/*` → returns `proofToken (m=1)`.
+- **Combined**: `requireTurn=true`, `requirePow=true`
+  - `/client/turn` is **disabled** (404).
+  - `proofToken (m=3)` is issued only from `/client/pow/open` on the final batch.
+
+## Combined mode: early-bind
+
+When Turnstile and PoW are both required:
+
+- The client must obtain a Turnstile token **before** PoW.
+- PoW seed is bound with `tb = base64url(sha256(token).slice(0, 12))`.
+- `/client/pow/commit` and `/client/pow/open` carry `turnToken`.
+- Final `/open` verifies `turnToken → tb`, then runs `siteverify` and issues `proofToken (m=3)`.
+
+This guarantees **one token → one PoW** and prevents reuse.
 
 ## Backend integration (caller)
 
 Typical flow:
 
-1) Your backend calls `server/generate` to mint a `chal` and a UI URL.
-2) The browser completes the challenge (landing UI) and receives `turnProofToken` and/or `powProofToken`.
+1) Your backend calls `server/generate` to mint a `chal` and UI URLs.
+2) The browser completes the challenge (landing UI) and returns `proofToken`.
 3) Your backend calls `server/attest` to decrypt `ctx`, then applies business checks and one-time consumption.
 
 If you use the provided browser helper (`frontend/caas-client.js`), expose two app endpoints that wrap CaaS:
@@ -52,9 +120,7 @@ If you use the provided browser helper (`frontend/caas-client.js`), expose two a
 - `POST /api/caas/generate` → calls `POST {API_PREFIX}/server/generate`
 - `POST /api/caas/attest` → calls `POST {API_PREFIX}/server/attest` and returns your application-specific decision
 
-See `examples/node-demo.mjs` for a minimal end-to-end implementation.
-
-Node (18+) example using `sdk/node.js`:
+### Node (18+) example using `sdk/node.js`
 
 ```js
 import { createCaasClient } from "./sdk/node.js";
@@ -84,19 +150,23 @@ const gen = await caas.generate({
   ctxB64,
   ttlSec: 300,
   policy: { requireTurn: true, requirePow: false },
-  turn: { enable: true, parentOrigin: "https://app.example.com", allowRedirect: true, returnUrl: "https://app.example.com/callback" },
+  turn: {
+    enable: true,
+    parentOrigin: "https://app.example.com",
+    allowRedirect: true,
+    returnUrl: "https://app.example.com/callback",
+  },
   pow: { enable: false },
 });
 
-// attest (after frontend returns proof tokens)
-const attest = await caas.attest({ chal: gen.chal, turnProofToken, powProofToken });
+// attest (after frontend returns proofToken)
+const attest = await caas.attest({ chal: gen.chal, proofToken });
 const ctxPlain = b64uJsonDecode(attest.ctxB64);
 ```
 
 Notes:
 
 - CaaS is stateless: replay prevention should be enforced by the caller (e.g. `ctx.jti` with Redis `SETNX`).
-- When `policy.requirePow` and `policy.requireTurn` are both `true`, `client/turn` requires `powProofToken` and verifies it before calling Turnstile.
 - Any “business binding” (IP/country/fingerprint/account) should be carried in `ctx` and checked by the caller.
 
 ## Frontend integration
@@ -117,17 +187,16 @@ const res = await caasRun({
 Redirect fallback:
 
 - Ensure your backend sets `turn.allowRedirect: true` and a `turn.returnUrl`.
-- If the flow redirects back to your `returnUrl`, parse `location.hash` for `turn=` / `pow=` and send them to your backend to run `attest`.
+- If the flow redirects back to your `returnUrl`, parse `location.hash` for `proof=` and send it to your backend to run `attest`.
+- `landingUrlRedirect` is omitted when `chal` exceeds `LANDING_CHAL_MAX_LEN`.
 
-## Files
+## Limits and sizing
 
-- `caas.js`: CaaS snippet/worker implementation.
-- `template.html`: minimal landing HTML template (inlined into `caas.js` by the build).
-- `glue.js`: landing frontend (postMessage handshake, Turnstile, optional PoW).
-- `frontend/caas-client.js`: browser helper for embedding the landing page and exchanging messages.
-- `sdk/node.js`: Node.js (18+) server SDK for calling `server/*`.
-- `examples/node-demo.mjs`: minimal end-to-end demo (local backend + static page).
-- `build.mjs`: build script (outputs `dist/caas_snippet.js`, checks the 32KB snippet limit).
+- `CTX_B64_MAX_LEN` controls the maximum input size for `ctxB64`.
+- `CHAL_B64_MAX_LEN` controls the maximum `chal` payload size (base64url).
+- `LANDING_CHAL_MAX_LEN` controls whether `chal` is allowed in URL hash redirects.
+
+Larger ctx values increase `chal` size. For large payloads, prefer postMessage flows (iframe/popup) and disable redirect hashes.
 
 ## Build
 
@@ -135,7 +204,7 @@ Redirect fallback:
 node caas/build.mjs
 ```
 
-Output: `dist/caas_snippet.js`
+Output: `dist/caas_snippet.js`.
 
 ## Demo (Node 18+)
 

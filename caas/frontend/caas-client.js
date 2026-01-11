@@ -173,8 +173,7 @@ async function runLandingHandshake({
   }
 
   const out = {};
-  if (typeof proofData.turnProofToken === "string") out.turnProofToken = proofData.turnProofToken;
-  if (typeof proofData.powProofToken === "string") out.powProofToken = proofData.powProofToken;
+  if (typeof proofData.proofToken === "string") out.proofToken = proofData.proofToken;
   cleanup();
   return { proof: out, redirected: false };
 }

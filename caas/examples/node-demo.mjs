@@ -109,10 +109,9 @@ document.getElementById("btn").onclick = async () => {
   if (req.method === "POST" && url.pathname === "/api/caas/attest") {
     const body = await readJson(req);
     const chal = String(body?.chal ?? "");
-    const turnProofToken = typeof body?.turnProofToken === "string" ? body.turnProofToken : "";
-    const powProofToken = typeof body?.powProofToken === "string" ? body.powProofToken : "";
+    const proofToken = typeof body?.proofToken === "string" ? body.proofToken : "";
 
-    const attest = await caas.attest({ chal, turnProofToken, powProofToken });
+    const attest = await caas.attest({ chal, proofToken });
     const ctxJson = JSON.parse(Buffer.from(attest.ctxB64, "base64url").toString("utf-8"));
 
     const key = `caas:jti:${ctxJson.jti}`;
@@ -141,4 +140,3 @@ http
     console.log(`demo listening on http://localhost:${PORT}`);
     console.log(`CAAS_ORIGIN=${CAAS_ORIGIN}`);
   });
-
