@@ -641,10 +641,9 @@ const resolveBypassRequest = (request, url, config) => {
   }
 
   if (stripHeader) {
-    if (forwardRequest === request) {
-      forwardRequest = new Request(request);
-    }
-    forwardRequest.headers.delete(headerName);
+    const headers = new Headers(forwardRequest.headers);
+    headers.delete(headerName);
+    forwardRequest = new Request(forwardRequest, { headers });
   }
 
   return { bypass: true, forwardRequest };
