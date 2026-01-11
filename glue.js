@@ -63,7 +63,7 @@ const initUi = () => {
     ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 0 0 1px rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease;}",
     "h1{margin:0 0 24px;font-size:15px;font-weight:500;color:var(--accent);letter-spacing:-0.01em;}",
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
-    "#ts{margin-top:16px;display:flex;justify-content:center;}#ts[hidden]{display:none!important;}",
+    "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}"
   ].join("");
@@ -154,7 +154,11 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
   }
   log("Waiting for Turnstile...");
   const container = document.createElement("div");
-  if (el) el.appendChild(container);
+  if (el) {
+    el.appendChild(container);
+    el.classList.add("show");
+    el.classList.remove("hide");
+  }
   let tokenResolve;
   let tokenReject;
   const nextToken = () =>
@@ -170,8 +174,9 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
       theme: "dark",
       cData: ticketMac,
       callback: (t) => {
-        if (el && !el.hidden) {
-          el.hidden = true;
+        if (el) {
+          el.classList.add("hide");
+          el.classList.remove("show");
         }
         if (tokenResolve) tokenResolve(t);
       },
@@ -189,14 +194,19 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
     } catch (e) {
       if (e && e.message === "Turnstile Expired") {
         log("Turnstile expired. Retrying...");
+        if (el) {
+          el.classList.add("show");
+          el.classList.remove("hide");
+        }
         tokenPromise = nextToken();
         if (ts && typeof ts.reset === "function") ts.reset(widgetId);
         continue;
       }
       throw e;
     }
-    if (el && !el.hidden) {
-      el.hidden = true;
+    if (el) {
+      el.classList.add("hide");
+      el.classList.remove("show");
     }
     const submitLine = submitToken ? log("Submitting Turnstile...") : -1;
     try {
@@ -204,8 +214,13 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
       if (submitLine !== -1) update(submitLine, "Submitting Turnstile... done");
       log("Turnstile... done");
       if (el) {
-        el.hidden = true;
-        el.innerHTML = "";
+        el.classList.add("hide");
+        el.classList.remove("show");
+        setTimeout(() => {
+          if (el.classList.contains("hide")) {
+            el.innerHTML = "";
+          }
+        }, 400);
       }
       if (ts && typeof ts.remove === "function" && widgetId !== null) {
         try {
@@ -216,8 +231,9 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
     } catch (e) {
       if (submitToken && e && e.message === "403") {
         update(submitLine, "Turnstile rejected. Please try again.");
-        if (el && el.hidden) {
-          el.hidden = false;
+        if (el) {
+          el.classList.add("show");
+          el.classList.remove("hide");
         }
         if (attempt >= maxAttempts) throw new Error("Turnstile Rejected");
         tokenPromise = nextToken();
