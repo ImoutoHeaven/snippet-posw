@@ -348,20 +348,19 @@ const runPowFlow = async (
     let verifySpinFrame = 0;
     const verifySpinChars = "|/-\\";
     let verifySpinTimer = null;
+    let verifyBaseMsg = "";
     while (state && state.done !== true) {
       round++;
       if (!Array.isArray(state.indices) || state.indices.length === 0) {
         throw new Error("Challenge Failed");
       }
-      const verifyBaseMsg = "Verifying #" + round + " (" + state.indices.length + ")...";
+      verifyBaseMsg = "Verifying #" + round + " (" + state.indices.length + ")...";
       if (verifyLine === -1) {
         verifyLine = log(verifyBaseMsg);
         verifySpinTimer = setInterval(() => {
           const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + '</span>';
           update(verifyLine, verifyBaseMsg + " " + spinner);
         }, 120);
-      } else {
-        update(verifyLine, verifyBaseMsg);
       }
       const indices = state.indices;
       const segs =

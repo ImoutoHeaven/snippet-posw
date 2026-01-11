@@ -325,17 +325,16 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
     let verifySpinFrame = 0;
     const verifySpinChars = "|/-\\";
     let verifySpinTimer = null;
+    let verifyBaseMsg = "";
     while (state && state.done === false) {
       round++;
-      const verifyBaseMsg = "Verifying #" + round + "...";
+      verifyBaseMsg = "Verifying #" + round + "...";
       if (verifyLine === -1) {
         verifyLine = log(verifyBaseMsg);
         verifySpinTimer = setInterval(() => {
           const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + '</span>';
           update(verifyLine, verifyBaseMsg + " " + spinner);
         }, 120);
-      } else {
-        update(verifyLine, verifyBaseMsg);
       }
 
       const opens = await commit.open(state.indices, { segLens: state.segs, spinePos: state.spinePos });
