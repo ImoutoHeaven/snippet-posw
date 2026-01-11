@@ -65,15 +65,20 @@ const initUi = () => {
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
     "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
-    "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}"
+    "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.98);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
+    "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.02em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
+    "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
+    "@keyframes scroll-left{from{transform:translate(100vw,-50%);}to{transform:translate(-100%,-50%);}}"
   ].join("");
   (document.head || document.documentElement).appendChild(style);
   document.body.innerHTML =
-    '<div class="card"><h1 id="t">Verifying...</h1><div id="log"></div><div id="ts"></div></div>';
+    '<div class="card"><h1 id="t">Verifying...</h1><div id="log"></div><div id="ts"></div></div><div id="ticker"><div id="ticker-text">This process is automatic unless turnstile asks you to click the box, you will be redirected after verification is done.</div></div>';
   return {
     logEl: document.getElementById("log"),
     tEl: document.getElementById("t"),
     tsEl: document.getElementById("ts"),
+    tickerEl: document.getElementById("ticker"),
+    tickerTextEl: document.getElementById("ticker-text"),
   };
 };
 
@@ -81,6 +86,23 @@ const ui = initUi();
 const lines = [];
 const MAX_VISIBLE_LINES = 6;
 document.title = "Verifying...";
+
+// Start ticker animation after 1.5 seconds
+setTimeout(() => {
+  if (ui.tickerEl && ui.tickerTextEl) {
+    ui.tickerEl.classList.add("show");
+    ui.tickerTextEl.classList.add("scrolling");
+
+    // Hide ticker after animation completes
+    ui.tickerTextEl.addEventListener("animationend", () => {
+      ui.tickerEl.classList.remove("show");
+      ui.tickerEl.classList.add("hide");
+      setTimeout(() => {
+        ui.tickerEl.style.display = "none";
+      }, 600);
+    }, { once: true });
+  }
+}, 1500);
 
 const render = () => {
   const total = lines.length;
