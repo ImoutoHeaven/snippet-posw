@@ -167,6 +167,8 @@ const buildProof = (levels, leafIndex) => {
   return { sibs, dirs: dirs.join("") };
 };
 
+export const workerUrl = new URL("./pow-worker.js", import.meta.url).toString();
+
 export async function computePoswCommit(bindingString, steps, options = {}) {
   if (typeof bindingString !== "string" || bindingString.length === 0) {
     throw new Error("bindingString required");

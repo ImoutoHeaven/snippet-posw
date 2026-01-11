@@ -55,6 +55,65 @@ const postJson = async (url, body, retries = 3) => {
   return {};
 };
 
+const createWorkerRpc = (worker, onProgress) => {
+  let rid = 0;
+  const pending = new Map();
+  const rejectAll = (err) => {
+    for (const entry of pending.values()) {
+      entry.reject(err);
+    }
+    pending.clear();
+  };
+  const handleMessage = (event) => {
+    const data = event && event.data ? event.data : {};
+    if (data.type === "PROGRESS") {
+      if (typeof onProgress === "function") onProgress(data);
+      return;
+    }
+    const entry = pending.get(data.rid);
+    if (!entry) return;
+    pending.delete(data.rid);
+    if (data.type === "ERROR") {
+      entry.reject(new Error(data.message || "Worker error"));
+      return;
+    }
+    entry.resolve(data);
+  };
+  worker.addEventListener("message", handleMessage);
+  worker.addEventListener("messageerror", () => {
+    rejectAll(new Error("Worker message error"));
+  });
+  worker.addEventListener("error", () => {
+    rejectAll(new Error("Worker error"));
+  });
+
+  const call = (type, payload) => {
+    const id = ++rid;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ ...(payload || {}), type, rid: id });
+    });
+  };
+
+  const cancel = () => {
+    try {
+      worker.postMessage({ type: "CANCEL" });
+    } catch {}
+  };
+
+  const dispose = () => {
+    cancel();
+    rejectAll(new Error("Worker disposed"));
+    try {
+      worker.postMessage({ type: "DISPOSE" });
+    } catch {}
+    worker.terminate();
+  };
+
+  return { call, cancel, dispose };
+};
+
+
 const initUi = () => {
   const style = document.createElement("style");
   style.textContent = [
@@ -291,47 +350,74 @@ const runPowFlow = async (
   log("Loading solver...");
   const esmUrl = decodeB64Url(String(esmUrlB64 || ""));
   const module = await import(esmUrl);
-  const computePoswCommit = module.computePoswCommit;
-  if (typeof computePoswCommit !== "function") {
-    throw new Error("Solver Missing");
+  const workerUrl = module.workerUrl;
+  if (!workerUrl) {
+    throw new Error("Worker Missing");
   }
   const authBinding = decodeB64Url(String(bindingB64 || ""));
   if (!authBinding) {
     throw new Error("Bad Binding");
   }
   const powBinding = turnToken ? `${authBinding}&tb=${await tbFromToken(turnToken)}` : authBinding;
-  const spinIndex = log("Computing hash chain...");
-  const spinChars = "|/-\\";
-  let spinFrame = 0;
-  let attemptCount = 0;
-  const spinTimer = setInterval(() => {
-    let msg = "Computing hash chain...";
-    if (attemptCount > 0) {
-      msg = "Screening hash (attempt " + attemptCount + ")...";
-    }
-    const spinner = '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + '</span>';
-    update(spinIndex, msg + " " + spinner);
-  }, 120);
+
+  const worker = new Worker(workerUrl, { type: "module" });
+  let spinTimer;
+  let verifySpinTimer;
   try {
-    const commit = await computePoswCommit(powBinding, steps, {
+    let spinIndex = -1;
+    let spinFrame = 0;
+    const spinChars = "|/-\\";
+    let attemptCount = 0;
+    let verifyLine = -1;
+    let verifySpinFrame = 0;
+    const verifySpinChars = "|/-\\";
+    let verifyBaseMsg = "";
+
+    const rpc = createWorkerRpc(worker, (progress) => {
+      if (progress.phase === "chain" && spinIndex === -1) {
+        spinIndex = log("Computing hash chain...");
+        spinTimer = setInterval(() => {
+          let msg = "Computing hash chain...";
+          if (attemptCount > 0) {
+            msg = "Screening hash (attempt " + attemptCount + ")...";
+          }
+          const spinner = '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
+          update(spinIndex, msg + " " + spinner);
+        }, 120);
+      }
+      if (progress.phase === "hashcash" && typeof progress.attempt === "number") {
+        attemptCount = progress.attempt;
+      }
+    });
+
+    await rpc.call("INIT", {
+      bindingString: powBinding,
+      steps,
       hashcashBits,
       segmentLen,
-      onStatus: (type, val) => {
-        if (type === "retry") attemptCount = val;
-      },
+      yieldEvery: 1024,
+      progressEvery: 1024,
     });
-    clearInterval(spinTimer);
-    const doneText = attemptCount > 0 ? "Screening hash... <span class=\"green\">done</span>" : "Computing hash chain... <span class=\"green\">done</span>";
-    update(spinIndex, doneText);
+
+    const commitRes = await rpc.call("COMMIT");
+    if (spinTimer) clearInterval(spinTimer);
+    if (spinIndex !== -1) {
+      const doneText = attemptCount > 0
+        ? "Screening hash... <span class=\"green\">done</span>"
+        : "Computing hash chain... <span class=\"green\">done</span>";
+      update(spinIndex, doneText);
+    }
+
     log("Submitting commit...");
     const commitBody = {
       ticketB64,
-      rootB64: commit.rootB64,
+      rootB64: commitRes.rootB64,
       pathHash,
-      nonce: commit.nonce,
+      nonce: commitRes.nonce,
     };
     if (turnToken) commitBody.token = turnToken;
     await postJson(apiPrefix + "/commit", commitBody);
+
     log("Requesting challenge...");
     let state = await postJson(apiPrefix + "/challenge", {});
     if (
@@ -343,12 +429,8 @@ const runPowFlow = async (
     ) {
       throw new Error("Challenge Failed");
     }
+
     let round = 0;
-    let verifyLine = -1;
-    let verifySpinFrame = 0;
-    const verifySpinChars = "|/-\\";
-    let verifySpinTimer = null;
-    let verifyBaseMsg = "";
     while (state && state.done !== true) {
       round++;
       if (!Array.isArray(state.indices) || state.indices.length === 0) {
@@ -358,7 +440,7 @@ const runPowFlow = async (
       if (verifyLine === -1) {
         verifyLine = log(verifyBaseMsg);
         verifySpinTimer = setInterval(() => {
-          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + '</span>';
+          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + "</span>";
           update(verifyLine, verifyBaseMsg + " " + spinner);
         }, 120);
       }
@@ -372,13 +454,13 @@ const runPowFlow = async (
         throw new Error("Challenge Failed");
       }
       const segLens = segs.map((v) => Number(v));
-      const opens = await commit.open(indices, { segLens, spinePos });
+      const openRes = await rpc.call("OPEN", { indices, segLens, spinePos });
       const openBody = {
         sid: state.sid,
         cursor: state.cursor,
         token: state.token,
         spinePos,
-        opens,
+        opens: openRes.opens,
       };
       if (turnToken) openBody.turnToken = turnToken;
       state = await postJson(apiPrefix + "/open", openBody);
@@ -396,8 +478,11 @@ const runPowFlow = async (
     if (verifySpinTimer) clearInterval(verifySpinTimer);
     if (verifyLine !== -1) update(verifyLine, "Verifying... <span class=\"green\">done</span>");
     log("PoW... <span class=\"green\">done</span>");
+    rpc.dispose();
   } finally {
-    clearInterval(spinTimer);
+    if (spinTimer) clearInterval(spinTimer);
+    if (verifySpinTimer) clearInterval(verifySpinTimer);
+    worker.terminate();
   }
 };
 

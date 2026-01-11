@@ -25,6 +25,64 @@ const tbFromToken = async (token) =>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const createWorkerRpc = (worker, onProgress) => {
+  let rid = 0;
+  const pending = new Map();
+  const rejectAll = (err) => {
+    for (const entry of pending.values()) {
+      entry.reject(err);
+    }
+    pending.clear();
+  };
+  const handleMessage = (event) => {
+    const data = event && event.data ? event.data : {};
+    if (data.type === "PROGRESS") {
+      if (typeof onProgress === "function") onProgress(data);
+      return;
+    }
+    const entry = pending.get(data.rid);
+    if (!entry) return;
+    pending.delete(data.rid);
+    if (data.type === "ERROR") {
+      entry.reject(new Error(data.message || "Worker error"));
+      return;
+    }
+    entry.resolve(data);
+  };
+  worker.addEventListener("message", handleMessage);
+  worker.addEventListener("messageerror", () => {
+    rejectAll(new Error("Worker message error"));
+  });
+  worker.addEventListener("error", () => {
+    rejectAll(new Error("Worker error"));
+  });
+
+  const call = (type, payload) => {
+    const id = ++rid;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ ...(payload || {}), type, rid: id });
+    });
+  };
+
+  const cancel = () => {
+    try {
+      worker.postMessage({ type: "CANCEL" });
+    } catch {}
+  };
+
+  const dispose = () => {
+    cancel();
+    rejectAll(new Error("Worker disposed"));
+    try {
+      worker.postMessage({ type: "DISPOSE" });
+    } catch {}
+    worker.terminate();
+  };
+
+  return { call, cancel, dispose };
+};
+
 // --- UI Logic (Aligned with Gate glue.js) ---
 
 let ui;
@@ -268,9 +326,9 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
 
   log("Loading solver...");
   const module = await import(powEsmUrl);
-  const computePoswCommit = module && module.computePoswCommit;
-  if (typeof computePoswCommit !== "function") {
-    throw new Error("computePoswCommit missing");
+  const workerUrl = module && module.workerUrl;
+  if (!workerUrl) {
+    throw new Error("workerUrl missing");
   }
 
   const bindingBase = `chalId=${chalId}`;
@@ -278,67 +336,88 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
     ? `${bindingBase}&tb=${await tbFromToken(turnToken)}`
     : bindingBase;
   const hashcashBits = Number(params && params.hashcashBits) || 0;
-  const segmentLen = 64;
+  const segmentLen = Number(params && params.segmentLen) || 64;
 
-  const spinIndex = log("Computing hash chain...");
-  const spinChars = "|/-\";
-  let spinFrame = 0;
-  let attemptCount = 0;
-  const spinTimer = setInterval(() => {
-    let msg = "Computing hash chain...";
-    if (attemptCount > 0) {
-      msg = "Screening hash (attempt " + attemptCount + ")...";
-    }
-    const spinner = '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + '</span>';
-    update(spinIndex, msg + " " + spinner);
-  }, 120);
-
+  const worker = new Worker(workerUrl, { type: "module" });
+  let spinTimer;
+  let verifySpinTimer;
   try {
-    const commit = await computePoswCommit(bindingString, steps, {
+    let spinIndex = -1;
+    let spinFrame = 0;
+    const spinChars = "|/-\\";
+    let attemptCount = 0;
+    let verifyLine = -1;
+    let verifySpinFrame = 0;
+    const verifySpinChars = "|/-\\";
+    let verifyBaseMsg = "";
+
+    const rpc = createWorkerRpc(worker, (progress) => {
+      if (progress.phase === "chain" && spinIndex === -1) {
+        spinIndex = log("Computing hash chain...");
+        spinTimer = setInterval(() => {
+          let msg = "Computing hash chain...";
+          if (attemptCount > 0) {
+            msg = "Screening hash (attempt " + attemptCount + ")...";
+          }
+          const spinner = '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
+          update(spinIndex, msg + " " + spinner);
+        }, 120);
+      }
+      if (progress.phase === "hashcash" && typeof progress.attempt === "number") {
+        attemptCount = progress.attempt;
+      }
+    });
+
+    await rpc.call("INIT", {
+      bindingString,
+      steps,
       hashcashBits,
       segmentLen,
-      yieldEvery: 256,
-      onStatus: (kind, val) => {
-        if (kind === "retry") attemptCount = val;
-      },
+      yieldEvery: 1024,
+      progressEvery: 1024,
     });
-    clearInterval(spinTimer);
-    const doneText = attemptCount > 0 ? "Screening hash... <span class=\"green\">done</span>" : "Computing hash chain... <span class=\"green\">done</span>";
-    update(spinIndex, doneText);
+
+    const commitRes = await rpc.call("COMMIT");
+    if (spinTimer) clearInterval(spinTimer);
+    if (spinIndex !== -1) {
+      const doneText = attemptCount > 0
+        ? "Screening hash... <span class=\"green\">done</span>"
+        : "Computing hash chain... <span class=\"green\">done</span>";
+      update(spinIndex, doneText);
+    }
 
     log("Submitting commit...");
-    const commitRes = await fetch(`${apiPrefix}/client/pow/commit`, {
+    const commitResHttp = await fetch(`${apiPrefix}/client/pow/commit`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chal,
-        rootB64: commit.rootB64,
-        nonce: commit.nonce,
+        rootB64: commitRes.rootB64,
+        nonce: commitRes.nonce,
         turnToken: turnToken || "",
       }),
     });
-    let state = await commitRes.json().catch(() => null);
-    if (!commitRes.ok || !state) throw new Error("pow commit failed");
+    let state = await commitResHttp.json().catch(() => null);
+    if (!commitResHttp.ok || !state) throw new Error("pow commit failed");
 
     let round = 0;
-    let verifyLine = -1;
-    let verifySpinFrame = 0;
-    const verifySpinChars = "|/-\\";
-    let verifySpinTimer = null;
-    let verifyBaseMsg = "";
     while (state && state.done === false) {
       round++;
       verifyBaseMsg = "Verifying #" + round + "...";
       if (verifyLine === -1) {
         verifyLine = log(verifyBaseMsg);
         verifySpinTimer = setInterval(() => {
-          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + '</span>';
+          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + "</span>";
           update(verifyLine, verifyBaseMsg + " " + spinner);
         }, 120);
       }
 
-      const opens = await commit.open(state.indices, { segLens: state.segs, spinePos: state.spinePos });
-      const openRes = await fetch(`${apiPrefix}/client/pow/open`, {
+      const openRes = await rpc.call("OPEN", {
+        indices: state.indices,
+        segLens: state.segs,
+        spinePos: state.spinePos,
+      });
+      const openResHttp = await fetch(`${apiPrefix}/client/pow/open`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -348,12 +427,12 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
           cursor: state.cursor,
           token: state.token,
           spinePos: state.spinePos,
-          opens,
+          opens: openRes.opens,
           turnToken: turnToken || "",
         }),
       });
-      state = await openRes.json().catch(() => null);
-      if (!openRes.ok || !state) throw new Error("pow open failed");
+      state = await openResHttp.json().catch(() => null);
+      if (!openResHttp.ok || !state) throw new Error("pow open failed");
       await sleep(0);
     }
     if (verifySpinTimer) clearInterval(verifySpinTimer);
@@ -362,9 +441,12 @@ async function solvePow({ apiPrefix, chal, chalId, powEsmUrl, turnToken }) {
     if (!state || state.done !== true || typeof state.proofToken !== "string") {
       throw new Error("pow solve failed");
     }
+    rpc.dispose();
     return state.proofToken;
   } finally {
-    clearInterval(spinTimer);
+    if (spinTimer) clearInterval(spinTimer);
+    if (verifySpinTimer) clearInterval(verifySpinTimer);
+    worker.terminate();
   }
 }
 
