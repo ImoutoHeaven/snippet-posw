@@ -66,7 +66,7 @@ const initUi = () => {
     "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
     "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.98);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
-    "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.02em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
+    "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.08em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
     "@keyframes scroll-left{from{transform:translate(100vw,-50%);}to{transform:translate(-100%,-50%);}}"
   ].join("");
@@ -345,14 +345,24 @@ const runPowFlow = async (
     }
     let round = 0;
     let verifyLine = -1;
+    let verifySpinFrame = 0;
+    const verifySpinChars = "|/-\\";
+    let verifySpinTimer = null;
     while (state && state.done !== true) {
       round++;
       if (!Array.isArray(state.indices) || state.indices.length === 0) {
         throw new Error("Challenge Failed");
       }
-      const verifyMsg = "Verifying #" + round + " (" + state.indices.length + ")...";
-      if (verifyLine === -1) verifyLine = log(verifyMsg);
-      else update(verifyLine, verifyMsg);
+      const verifyBaseMsg = "Verifying #" + round + " (" + state.indices.length + ")...";
+      if (verifyLine === -1) {
+        verifyLine = log(verifyBaseMsg);
+        verifySpinTimer = setInterval(() => {
+          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + '</span>';
+          update(verifyLine, verifyBaseMsg + " " + spinner);
+        }, 120);
+      } else {
+        update(verifyLine, verifyBaseMsg);
+      }
       const indices = state.indices;
       const segs =
         Array.isArray(state.segs) && state.segs.length === indices.length
@@ -384,6 +394,7 @@ const runPowFlow = async (
         throw new Error("Challenge Failed");
       }
     }
+    if (verifySpinTimer) clearInterval(verifySpinTimer);
     if (verifyLine !== -1) update(verifyLine, "Verifying... <span class=\"green\">done</span>");
     log("PoW... <span class=\"green\">done</span>");
   } finally {
