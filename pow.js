@@ -44,9 +44,9 @@ const DEFAULTS = {
   IPV6_PREFIX: 64,
   POW_COMMIT_COOKIE: "__Host-pow_commit",
   POW_ESM_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@a9684b5e5efeb818ff8aa115f2667d289635f6b7/esm/esm.js",
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@49e3a31657413e394e42aba7f18c37b34223def1/esm/esm.js",
   POW_GLUE_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@a9684b5e5efeb818ff8aa115f2667d289635f6b7/glue.js",
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@49e3a31657413e394e42aba7f18c37b34223def1/glue.js",
 };
 
 const CONFIG = [
