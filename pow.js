@@ -2349,13 +2349,27 @@ export default {
       const baseRequest = bindRes.forwardRequest;
       const baseUrl = new URL(baseRequest.url);
       const atomic = extractAtomicAuth(baseRequest, baseUrl, config);
-      const fail = (resp) =>
-        atomic.fromCookie ? withClearedCookie(resp, atomic.cookieName) : resp;
+      const fail = async (resp, allowChallenge = true) => {
+        if (allowChallenge && isNavigationRequest(request)) {
+          const challenge = await respondPowChallengeHtml(
+            baseRequest,
+            baseUrl,
+            bindRes.canonicalPath,
+            nowSeconds,
+            config,
+            powSecret,
+            cfgId,
+            { needPow, needTurn }
+          );
+          return atomic.fromCookie ? withClearedCookie(challenge, atomic.cookieName) : challenge;
+        }
+        return atomic.fromCookie ? withClearedCookie(resp, atomic.cookieName) : resp;
+      };
       if (atomic.turnToken) {
         const turnToken = validateTurnToken(atomic.turnToken);
-        if (!turnToken) return fail(deny());
+        if (!turnToken) return await fail(deny());
         const turnSecret = getTurnSecret(config);
-        if (!turnSecret) return fail(S(500));
+        if (!turnSecret) return await fail(S(500), false);
         if (needPow) {
           const consume = await verifyConsumeToken(
             atomic.consumeToken,
@@ -2363,9 +2377,9 @@ export default {
             nowSeconds,
             requiredMask
           );
-          if (!consume) return fail(deny());
+          if (!consume) return await fail(deny());
           const tb = await tbFromToken(turnToken);
-          if (tb !== consume.tb) return fail(deny());
+          if (tb !== consume.tb) return await fail(deny());
           const ticket = await loadAtomicTicket(
             consume.ticketB64,
             baseRequest,
@@ -2376,9 +2390,9 @@ export default {
             cfgId,
             nowSeconds
           );
-          if (!ticket) return fail(deny());
+          if (!ticket) return await fail(deny());
           if (!(await verifyTurnstileForTicket(baseRequest, turnSecret, turnToken, ticket))) {
-            return fail(deny());
+            return await fail(deny());
           }
           const response = await fetch(atomic.forwardRequest);
           return atomic.fromCookie ? withClearedCookie(response, atomic.cookieName) : response;
@@ -2393,9 +2407,9 @@ export default {
           cfgId,
           nowSeconds
         );
-        if (!ticket) return fail(deny());
+        if (!ticket) return await fail(deny());
         if (!(await verifyTurnstileForTicket(baseRequest, turnSecret, turnToken, ticket))) {
-          return fail(deny());
+          return await fail(deny());
         }
         const response = await fetch(atomic.forwardRequest);
         return atomic.fromCookie ? withClearedCookie(response, atomic.cookieName) : response;

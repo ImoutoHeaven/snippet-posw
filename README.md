@@ -169,6 +169,7 @@ Atomic consume (`ATOMIC_CONSUME=true`):
 - **Turn-only**: `/__pow/turn` is disabled (404). Client attaches `turnToken + ticket` to the business request and the snippet verifies + forwards the original request.
 - **Combined**: `/__pow/open` returns `{ done: true, consume: "v2..." }` and does **not** set `__Host-proof`. Client attaches `turnToken + consume` to the business request; the snippet verifies consume (HMAC + tb), binding, then `siteverify`.
 - **Transport**: cookie > header > query (header preferred over query when both present). Navigation tries a short-lived cookie first (Max-Age 5s, Path = target), then falls back to query; embedded flows use `postMessage` for header replay. Tokens are stripped when `STRIP_ATOMIC_QUERY/STRIP_ATOMIC_HEADERS` are `true`. The cookie is cleared after use.
+- **Navigation failure**: if atomic validation fails, navigation requests fall back to the challenge page (non-navigation still returns 403).
 
 ### Early-bind (combined mode)
 
