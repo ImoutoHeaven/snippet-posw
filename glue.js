@@ -34,6 +34,7 @@ const parseAtomicCfg = (raw) => {
       tt: parts[5] || "x-ticket",
       ct: parts[6] || "x-consume",
     },
+    c: parts[7] || "__Host-pow_a",
   };
 };
 
@@ -71,6 +72,15 @@ const postJson = async (url, body, retries = 3) => {
   }
   return {};
 };
+
+const setAtomicCookie = (name, value, maxAge) => {
+  if (!name || !value) return false;
+  document.cookie = `${name}=${value}; Max-Age=${maxAge}; Path=/; Secure; SameSite=Lax`;
+  return document.cookie.includes(`${name}=`);
+};
+
+const canUseCookie = (name, value) =>
+  Boolean(name && value && value.length + name.length + 1 <= 3800);
 
 const addQuery = (url, kv) => {
   const next = new URL(url, window.location.href);
@@ -558,6 +568,7 @@ export default async function runPow(
     const H_TURN = cfg.h.ts;
     const H_TICKET = cfg.h.tt;
     const H_CONSUME = cfg.h.ct;
+    const C_NAME = cfg.c;
 
     if (!needPow && !needTurn) throw new Error("No Challenge");
 
@@ -573,6 +584,14 @@ export default async function runPow(
           log("Access granted. You may close this window.");
           setStatus(true);
           document.title = "Done";
+          return;
+        }
+        const cookieValue = `1|t|${turnToken}|${ticketB64}`;
+        if (canUseCookie(C_NAME, cookieValue) && setAtomicCookie(C_NAME, cookieValue, 10)) {
+          log("Access granted. <span class=\"yellow\">Redirecting...</span>");
+          setStatus(true);
+          document.title = "Redirecting";
+          window.location.replace(target);
           return;
         }
         log("Access granted. <span class=\"yellow\">Redirecting...</span>");
@@ -620,6 +639,14 @@ export default async function runPow(
           log("Access granted. You may close this window.");
           setStatus(true);
           document.title = "Done";
+          return;
+        }
+        const cookieValue = `1|c|${turnToken}|${consume}`;
+        if (canUseCookie(C_NAME, cookieValue) && setAtomicCookie(C_NAME, cookieValue, 10)) {
+          log("Access granted. <span class=\"yellow\">Redirecting...</span>");
+          setStatus(true);
+          document.title = "Redirecting";
+          window.location.replace(target);
           return;
         }
         log("Access granted. <span class=\"yellow\">Redirecting...</span>");

@@ -36,6 +36,7 @@ const DEFAULTS = {
   ATOMIC_TURN_HEADER: "x-turnstile",
   ATOMIC_TICKET_HEADER: "x-ticket",
   ATOMIC_CONSUME_HEADER: "x-consume",
+  ATOMIC_COOKIE_NAME: "__Host-pow_a",
   STRIP_ATOMIC_QUERY: true,
   STRIP_ATOMIC_HEADERS: true,
   INNER_AUTH_QUERY_NAME: "",
@@ -353,6 +354,17 @@ const J = (payload, status = 200, headers) =>
   new Response(JSON.stringify(payload), { status, headers });
 const deny = () => S(403);
 
+const withClearedCookie = (response, name) => {
+  if (!name) return response;
+  const headers = new Headers(response.headers);
+  clearCookie(headers, name);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+};
+
 const isNavigationRequest = (request) => {
   const mode = request.headers.get("Sec-Fetch-Mode") || "";
   if (mode === "navigate") return true;
@@ -612,19 +624,36 @@ const extractAtomicAuth = (request, url, config) => {
     (typeof config.ATOMIC_CONSUME_HEADER === "string" &&
       config.ATOMIC_CONSUME_HEADER.trim()) ||
     DEFAULTS.ATOMIC_CONSUME_HEADER;
+  const cookieName =
+    (typeof config.ATOMIC_COOKIE_NAME === "string" && config.ATOMIC_COOKIE_NAME.trim()) ||
+    DEFAULTS.ATOMIC_COOKIE_NAME;
 
   let turnToken = "";
   let ticketB64 = "";
   let consumeToken = "";
-  const headerTurn = hTurn ? request.headers.get(hTurn) : "";
-  if (headerTurn) {
-    turnToken = headerTurn;
-    ticketB64 = hTicket ? request.headers.get(hTicket) || "" : "";
-    consumeToken = hConsume ? request.headers.get(hConsume) || "" : "";
-  } else {
-    turnToken = qTurn ? url.searchParams.get(qTurn) || "" : "";
-    ticketB64 = qTicket ? url.searchParams.get(qTicket) || "" : "";
-    consumeToken = qConsume ? url.searchParams.get(qConsume) || "" : "";
+  let fromCookie = false;
+  if (cookieName) {
+    const cookies = parseCookieHeader(request.headers.get("Cookie"));
+    const raw = cookies.get(cookieName) || "";
+    const parsed = parseAtomicCookie(raw);
+    if (parsed) {
+      turnToken = parsed.turnToken;
+      ticketB64 = parsed.ticketB64;
+      consumeToken = parsed.consumeToken;
+      fromCookie = true;
+    }
+  }
+  if (!fromCookie) {
+    const headerTurn = hTurn ? request.headers.get(hTurn) : "";
+    if (headerTurn) {
+      turnToken = headerTurn;
+      ticketB64 = hTicket ? request.headers.get(hTicket) || "" : "";
+      consumeToken = hConsume ? request.headers.get(hConsume) || "" : "";
+    } else {
+      turnToken = qTurn ? url.searchParams.get(qTurn) || "" : "";
+      ticketB64 = qTicket ? url.searchParams.get(qTicket) || "" : "";
+      consumeToken = qConsume ? url.searchParams.get(qConsume) || "" : "";
+    }
   }
 
   const stripQuery = config.STRIP_ATOMIC_QUERY !== false;
@@ -671,7 +700,7 @@ const extractAtomicAuth = (request, url, config) => {
     }
   }
 
-  return { turnToken, ticketB64, consumeToken, forwardRequest };
+  return { turnToken, ticketB64, consumeToken, forwardRequest, fromCookie, cookieName };
 };
 
 const buildTlsFingerprintHash = async (request) => {
@@ -1132,6 +1161,19 @@ const parseConsumeToken = (value) => {
   return { ticketB64, exp, tb, m, mac };
 };
 
+const parseAtomicCookie = (value) => {
+  if (!value || typeof value !== "string") return null;
+  const parts = value.split("|");
+  if (parts[0] !== "1" || parts.length < 4) return null;
+  const mode = parts[1];
+  const turnToken = parts[2] || "";
+  const payload = parts[3] || "";
+  if (!turnToken || !payload) return null;
+  if (mode === "t") return { turnToken, ticketB64: payload, consumeToken: "" };
+  if (mode === "c") return { turnToken, ticketB64: "", consumeToken: payload };
+  return null;
+};
+
 const makeProofMac = async (powSecret, ticketB64, iat, last, n, m) =>
   hmacSha256Base64UrlNoPad(powSecret, `O|${ticketB64}|${iat}|${last}|${n}|${m}`);
 
@@ -1590,7 +1632,10 @@ const respondPowChallengeHtml = async (
     (typeof config.ATOMIC_CONSUME_HEADER === "string" &&
       config.ATOMIC_CONSUME_HEADER.trim()) ||
     DEFAULTS.ATOMIC_CONSUME_HEADER;
-  const atomicCfg = `${atomicConsume}|${atomicTurnQuery}|${atomicTicketQuery}|${atomicConsumeQuery}|${atomicTurnHeader}|${atomicTicketHeader}|${atomicConsumeHeader}`;
+  const atomicCookieName =
+    (typeof config.ATOMIC_COOKIE_NAME === "string" && config.ATOMIC_COOKIE_NAME.trim()) ||
+    DEFAULTS.ATOMIC_COOKIE_NAME;
+  const atomicCfg = `${atomicConsume}|${atomicTurnQuery}|${atomicTicketQuery}|${atomicConsumeQuery}|${atomicTurnHeader}|${atomicTicketHeader}|${atomicConsumeHeader}|${atomicCookieName}`;
   const segmentLenFixed = Math.max(
     1,
     Math.min(
@@ -2382,7 +2427,8 @@ export default {
           if (!(await verifyTurnstileForTicket(baseRequest, turnSecret, turnToken, ticket))) {
             return deny();
           }
-          return fetch(atomic.forwardRequest);
+          const response = await fetch(atomic.forwardRequest);
+          return atomic.fromCookie ? withClearedCookie(response, atomic.cookieName) : response;
         }
         const ticket = await loadAtomicTicket(
           atomic.ticketB64,
@@ -2398,7 +2444,8 @@ export default {
         if (!(await verifyTurnstileForTicket(baseRequest, turnSecret, turnToken, ticket))) {
           return deny();
         }
-        return fetch(atomic.forwardRequest);
+        const response = await fetch(atomic.forwardRequest);
+        return atomic.fromCookie ? withClearedCookie(response, atomic.cookieName) : response;
       }
     }
 
