@@ -180,6 +180,26 @@ In combined mode, PoW is bound to the Turnstile token:
 
 This guarantees **one token → one PoW**, preventing “1 PoW + N tokens”.
 
+### Turnstile limitations (captcha-solver proxying)
+
+Some captcha-solving platforms now support SOCKS5 proxies supplied by the client. In that setup, PoW and RTT-lock are performed on the attacker's machine, while Turnstile token minting, `cData`, and the SOCKS5 proxy are handled by the solver. Turnstile effectively degrades to **friction** plus a **single-use consumption lock**.
+
+If the attacker pays for a high-end SOCKS5 proxy and makes the solver appear as the *same egress IP*, then:
+
+- IP can be matched (via the proxy).
+- `cData` can be matched (client-supplied parameter).
+- TLS fingerprint **cannot** be matched (solver uses a different stack, e.g., Chrome vs. Python).
+
+Because Turnstile does **not** return the verified IP/TLS fingerprint, TLS binding becomes ineffective in this extreme case, and defense degrades to pure economic friction.
+
+Ideally Turnstile would expose server-enforced flags such as:
+
+- `force-verify-remoteip: true`
+- `tls-fingerprint: <payload>`
+- `force-verify-tls-fingerprint: true`
+
+and return only `success: true/false`. Today it does not. `cData` is opaque and cannot prevent attacker-supplied input, since it is **client-provided**, not extracted by Cloudflare. Treat `cData` as a low-cost check, not a silver bullet.
+
 ### `tb` design (Turnstile binding tag)
 
 `tb` is a compact binding tag derived from the Turnstile token:
