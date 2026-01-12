@@ -561,7 +561,7 @@ export default async function runPow(
 
     if (!needPow && !needTurn) throw new Error("No Challenge");
 
-    const embedded = !!(window.opener || window.parent !== window);
+    const embedded = window.parent !== window;
 
     if (needTurn && !needPow) {
       if (atomicEnabled) {
