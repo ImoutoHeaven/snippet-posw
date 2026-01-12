@@ -59,6 +59,16 @@ Each `CONFIG` entry looks like:
 | `POW_TOKEN` | `string` | — | HMAC secret for ticket binding + cookie MACs. Required when `powcheck` or `turncheck` is `true`. |
 | `TURNSTILE_SITEKEY` | `string` | — | Turnstile site key (client-side). Required when `turncheck: true`. |
 | `TURNSTILE_SECRET` | `string` | — | Turnstile secret key (used for `siteverify`, includes `remoteip`). Required when `turncheck: true`. |
+| `ATOMIC_CONSUME` | `boolean` | `false` | Enable business-path atomic consume for Turnstile (and PoW+Turnstile). Disables `/__pow/turn`; in combined mode `/__pow/open` returns `consume` instead of setting `__Host-proof`. |
+| `ATOMIC_TURN_QUERY` | `string` | `"__ts"` | Query param for Turnstile token (atomic). |
+| `ATOMIC_TICKET_QUERY` | `string` | `"__tt"` | Query param for ticket (`turn` + atomic). |
+| `ATOMIC_CONSUME_QUERY` | `string` | `"__ct"` | Query param for consume token (combined + atomic). |
+| `ATOMIC_TURN_HEADER` | `string` | `"x-turnstile"` | Header for Turnstile token (atomic). |
+| `ATOMIC_TICKET_HEADER` | `string` | `"x-ticket"` | Header for ticket (`turn` + atomic). |
+| `ATOMIC_CONSUME_HEADER` | `string` | `"x-consume"` | Header for consume token (combined + atomic). |
+| `ATOMIC_COOKIE_NAME` | `string` | `"__Secure-pow_a"` | Short-lived cookie name for atomic navigation redirects; cleared after use. |
+| `STRIP_ATOMIC_QUERY` | `boolean` | `true` | Remove atomic query params before proxying. |
+| `STRIP_ATOMIC_HEADERS` | `boolean` | `true` | Remove atomic headers before proxying. |
 | `POW_API_PREFIX` | `string` | `"/__pow"` | API prefix for PoW endpoints. |
 | `POW_GLUE_URL` | `string` | (repo-pinned) | ES module URL imported by the challenge page (client UI + orchestration). |
 | `POW_ESM_URL` | `string` | (repo-pinned) | ES module URL for the PoW solver (`computePoswCommit`). Required when `powcheck: true`. |
@@ -111,6 +121,7 @@ The gate issues a single proof cookie with a mode mask:
   - `3` = PoW + Turnstile
 
 A request is allowed when `(m & requiredMask) == requiredMask`.
+When `ATOMIC_CONSUME` is enabled, the proof cookie is still accepted if present, but new validations happen on the business path using atomic tokens (no new `__Host-proof` is issued).
 
 ## Internal bypass
 
@@ -147,11 +158,17 @@ Notes:
 ## Turnstile integration
 
 - Turnstile renders with `cData = ticket.mac`.
-- **Turn-only** (`powcheck=false, turncheck=true`):
-  - Client calls `POST /__pow/turn` → server `siteverify` → `__Host-proof (m=2)`.
-- **Combined** (`powcheck=true, turncheck=true`):
-  - `/__pow/turn` is disabled (404).
-  - `siteverify` happens only in the final `POST /__pow/open`.
+
+Default (`ATOMIC_CONSUME=false`):
+
+- **Turn-only** (`powcheck=false, turncheck=true`): client calls `POST /__pow/turn` → server `siteverify` → `__Host-proof (m=2)`.
+- **Combined** (`powcheck=true, turncheck=true`): `/__pow/turn` is disabled (404); `siteverify` happens only in the final `POST /__pow/open`.
+
+Atomic consume (`ATOMIC_CONSUME=true`):
+
+- **Turn-only**: `/__pow/turn` is disabled (404). Client attaches `turnToken + ticket` to the business request and the snippet verifies + forwards the original request.
+- **Combined**: `/__pow/open` returns `{ done: true, consume: "v2..." }` and does **not** set `__Host-proof`. Client attaches `turnToken + consume` to the business request; the snippet verifies consume (HMAC + tb), binding, then `siteverify`.
+- **Transport**: cookie > header > query (header preferred over query when both present). Tokens are stripped when `STRIP_ATOMIC_QUERY/STRIP_ATOMIC_HEADERS` are `true`. The cookie is short-lived and cleared after use.
 
 ### Early-bind (combined mode)
 
@@ -173,8 +190,9 @@ PoW uses a stateless CCR API:
 2. **Challenge**: the browser calls `POST /__pow/challenge`.
    - The snippet uses deterministic RNG derived from the commit to generate sampled `indices`, `segLen`, optional `spinePos`, and a batch `token`.
 3. **Open**: the browser calls `POST /__pow/open` with `opens` for the sampled indices.
-   - The snippet verifies and advances the cursor; repeats until done, then issues `__Host-proof`.
-   - In combined mode, the final `/open` must include `turnToken` and triggers `siteverify`.
+   - The snippet verifies and advances the cursor; repeats until done, then issues `__Host-proof` (non-atomic).
+   - In combined mode, the final `/open` must include `turnToken` and triggers `siteverify` (non-atomic).
+   - In atomic combined mode, the final `/open` returns `consume` and `siteverify` moves to the business path.
 
 Key properties:
 
