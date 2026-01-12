@@ -2316,16 +2316,19 @@ export default {
     }
 
     const requiredMask = (needPow ? 1 : 0) | (needTurn ? 2 : 0);
-    const proofMeta = await verifyProofCookie(
-      request,
-      url,
-      bindRes.canonicalPath,
-      nowSeconds,
-      config,
-      powSecret,
-      cfgId,
-      requiredMask
-    );
+    const allowProof = !(needTurn && config.ATOMIC_CONSUME === true);
+    const proofMeta = allowProof
+      ? await verifyProofCookie(
+          request,
+          url,
+          bindRes.canonicalPath,
+          nowSeconds,
+          config,
+          powSecret,
+          cfgId,
+          requiredMask
+        )
+      : null;
 
     if (proofMeta) {
       let response = await fetch(bindRes.forwardRequest);

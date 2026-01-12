@@ -59,7 +59,7 @@ Each `CONFIG` entry looks like:
 | `POW_TOKEN` | `string` | — | HMAC secret for ticket binding + cookie MACs. Required when `powcheck` or `turncheck` is `true`. |
 | `TURNSTILE_SITEKEY` | `string` | — | Turnstile site key (client-side). Required when `turncheck: true`. |
 | `TURNSTILE_SECRET` | `string` | — | Turnstile secret key (used for `siteverify`, includes `remoteip`). Required when `turncheck: true`. |
-| `ATOMIC_CONSUME` | `boolean` | `false` | Enable business-path atomic consume for Turnstile (and PoW+Turnstile). Disables `/__pow/turn`; in combined mode `/__pow/open` returns `consume` instead of setting `__Host-proof`. |
+| `ATOMIC_CONSUME` | `boolean` | `false` | Enable business-path atomic consume for Turnstile (and PoW+Turnstile). Disables `/__pow/turn`; in combined mode `/__pow/open` returns `consume` instead of setting `__Host-proof`. When Turnstile is required, proof cookies are ignored. |
 | `ATOMIC_TURN_QUERY` | `string` | `"__ts"` | Query param for Turnstile token (atomic). |
 | `ATOMIC_TICKET_QUERY` | `string` | `"__tt"` | Query param for ticket (`turn` + atomic). |
 | `ATOMIC_CONSUME_QUERY` | `string` | `"__ct"` | Query param for consume token (combined + atomic). |
@@ -121,7 +121,7 @@ The gate issues a single proof cookie with a mode mask:
   - `3` = PoW + Turnstile
 
 A request is allowed when `(m & requiredMask) == requiredMask`.
-When `ATOMIC_CONSUME` is enabled, the proof cookie is still accepted if present, but new validations happen on the business path using atomic tokens (no new `__Host-proof` is issued).
+When `ATOMIC_CONSUME` is enabled and Turnstile is required, proof cookies are ignored; atomic tokens on the business request are mandatory.
 
 ## Internal bypass
 
