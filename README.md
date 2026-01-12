@@ -191,6 +191,7 @@ If the attacker pays for a high-end SOCKS5 proxy and makes the solver appear as 
 - TLS fingerprint **cannot** be matched (solver uses a different stack, e.g., Chrome vs. Python).
 
 Because Turnstile does **not** return the verified IP/TLS fingerprint, TLS binding becomes ineffective in this extreme case, and defense degrades to pure economic friction.
+Turnstile almost certainly has access to these signals but chooses not to expose or enforce them, which is hard not to find suspicious.
 
 Ideally Turnstile would expose server-enforced flags such as:
 
