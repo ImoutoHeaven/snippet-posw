@@ -69,7 +69,7 @@ Each `CONFIG` entry looks like:
 | `ATOMIC_COOKIE_NAME` | `string` | `"__Secure-pow_a"` | Short-lived cookie name for atomic navigation redirects; cleared after use. |
 | `STRIP_ATOMIC_QUERY` | `boolean` | `true` | Remove atomic query params before proxying. |
 | `STRIP_ATOMIC_HEADERS` | `boolean` | `true` | Remove atomic headers before proxying. |
-| `POW_API_PREFIX` | `string` | `"/__pow"` | API prefix for PoW endpoints. |
+| `POW_API_PREFIX` | `string` | `"/__pow"` | Global API prefix for PoW endpoints (edit `DEFAULTS` in `pow.js`; per-entry override is ignored). |
 | `POW_GLUE_URL` | `string` | (repo-pinned) | ES module URL imported by the challenge page (client UI + orchestration). |
 | `POW_ESM_URL` | `string` | (repo-pinned) | ES module URL for the PoW solver (`computePoswCommit`). Required when `powcheck: true`. |
 | `POW_VERSION` | `number` | `3` | Ticket version (changing breaks existing cookies). |
@@ -168,14 +168,14 @@ Atomic consume (`ATOMIC_CONSUME=true`):
 
 - **Turn-only**: `/__pow/turn` is disabled (404). Client attaches `turnToken + ticket` to the business request and the snippet verifies + forwards the original request.
 - **Combined**: `/__pow/open` returns `{ done: true, consume: "v2..." }` and does **not** set `__Host-proof`. Client attaches `turnToken + consume` to the business request; the snippet verifies consume (HMAC + tb), binding, then `siteverify`.
-- **Transport**: cookie > header > query (header preferred over query when both present). Tokens are stripped when `STRIP_ATOMIC_QUERY/STRIP_ATOMIC_HEADERS` are `true`. The cookie is short-lived and cleared after use.
+- **Transport**: cookie > header > query (header preferred over query when both present). Navigation tries a short-lived cookie first (Max-Age 5s, Path = target), then falls back to query; embedded flows use `postMessage` for header replay. Tokens are stripped when `STRIP_ATOMIC_QUERY/STRIP_ATOMIC_HEADERS` are `true`. The cookie is cleared after use.
 
 ### Early-bind (combined mode)
 
 In combined mode, PoW is bound to the Turnstile token:
 
 - `tb = base64url(sha256(turnstile_token).slice(0, 12))`
-- PoW seed uses `bindingString + "&tb=" + tb`.
+- PoW seed uses `bindingString + "|" + tb`.
 - `__Host-pow_commit` (v4) carries `tb` and the final `/open` verifies `turnToken → tb`.
 
 This guarantees **one token → one PoW**, preventing “1 PoW + N tokens”.
