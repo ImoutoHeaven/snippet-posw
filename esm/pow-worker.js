@@ -10,7 +10,81 @@ const HASHCASH_PREFIX = encoder.encode("hashcash|v3|");
 const base64UrlEncodeNoPad = (bytes) =>
   btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 
+const HASH_WASM_URL = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
+let wasmSha256Promise = null;
+let wasmSha256Failed = false;
+
+const normalizeHashInput = (data) => {
+  if (data instanceof Uint8Array) return data;
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  return data;
+};
+
+const hexToBytes = (hex) => {
+  if (typeof hex !== "string" || hex.length % 2 !== 0) return null;
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    const byte = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    if (!Number.isFinite(byte)) return null;
+    out[i] = byte;
+  }
+  return out;
+};
+
+const loadWasmSha256 = async () => {
+  if (wasmSha256Failed) return null;
+  if (!wasmSha256Promise) {
+    wasmSha256Promise = (async () => {
+      const mod = await import(HASH_WASM_URL);
+      if (!mod || typeof mod.createSHA256 !== "function") {
+        throw new Error("hash-wasm unavailable");
+      }
+      const hasher = await mod.createSHA256();
+      if (!hasher || typeof hasher.init !== "function" || typeof hasher.update !== "function") {
+        throw new Error("hash-wasm invalid");
+      }
+      return hasher;
+    })();
+  }
+  try {
+    return await wasmSha256Promise;
+  } catch {
+    wasmSha256Failed = true;
+    wasmSha256Promise = null;
+    return null;
+  }
+};
+
+const sha256Bytes = async (data) => {
+  const input = normalizeHashInput(data);
+  const hasher = await loadWasmSha256();
+  if (hasher) {
+    try {
+      hasher.init();
+      hasher.update(input);
+      const digest = hasher.digest("binary");
+      if (digest instanceof Uint8Array) return digest;
+      if (ArrayBuffer.isView(digest)) {
+        return new Uint8Array(digest.buffer, digest.byteOffset, digest.byteLength);
+      }
+      if (typeof digest === "string") {
+        const bytes = hexToBytes(digest);
+        if (bytes) return bytes;
+      }
+    } catch {
+      wasmSha256Failed = true;
+      wasmSha256Promise = null;
+    }
+  }
+  const fallback = await crypto.subtle.digest("SHA-256", input);
+  return new Uint8Array(fallback);
+};
+
 const encodeToBuffer = (value, buffer) => {
+
   const text = String(value ?? "");
   if (encoder.encodeInto) {
     return encoder.encodeInto(text, buffer).written;
@@ -239,15 +313,17 @@ const computeCommit = async () => {
     const nonceLen = encodeToBuffer(nonce, nonceBytes);
     seedIn.set(nonceBytes.subarray(0, nonceLen), seedNonceOffset);
     const seedView = seedIn.subarray(0, seedNonceOffset + nonceLen);
-    const seedDigest = await crypto.subtle.digest("SHA-256", seedView);
-    chainBuf.set(new Uint8Array(seedDigest), 0);
+    const seedDigest = await sha256Bytes(seedView);
+    chainBuf.set(seedDigest, 0);
+
 
     for (let i = 1; i <= L; i++) {
       checkCanceled();
       stepView.setUint32(stepIndexOffset, i >>> 0, false);
       stepIn.set(chainBuf.subarray((i - 1) * 32, i * 32), stepDataOffset);
-      const digest = await crypto.subtle.digest("SHA-256", stepIn);
-      chainBuf.set(new Uint8Array(digest), i * 32);
+      const digest = await sha256Bytes(stepIn);
+      chainBuf.set(digest, i * 32);
+
       if (shouldYield(i, yieldEvery)) {
         if (shouldYield(i, progressEvery)) {
           emitProgress("chain", i, L, attempt - 1);
@@ -260,8 +336,9 @@ const computeCommit = async () => {
       checkCanceled();
       leafView.setUint32(leafIndexOffset, i >>> 0, false);
       leafIn.set(chainBuf.subarray(i * 32, i * 32 + 32), leafDataOffset);
-      const digest = await crypto.subtle.digest("SHA-256", leafIn);
-      leafBuf.set(new Uint8Array(digest), i * 32);
+      const digest = await sha256Bytes(leafIn);
+      leafBuf.set(digest, i * 32);
+
       if (shouldYield(i + 1, yieldEvery)) {
         if (shouldYield(i + 1, progressEvery)) {
           emitProgress("leaf", i + 1, leafCount, attempt - 1);
@@ -282,8 +359,9 @@ const computeCommit = async () => {
         const rightOffset = rightIdx * 32;
         nodeIn.set(curr.subarray(leftOffset, leftOffset + 32), nodeDataOffset);
         nodeIn.set(curr.subarray(rightOffset, rightOffset + 32), nodeDataOffset + 32);
-        const digest = await crypto.subtle.digest("SHA-256", nodeIn);
-        next.set(new Uint8Array(digest), i * 32);
+        const digest = await sha256Bytes(nodeIn);
+        next.set(digest, i * 32);
+
       }
       levelCount = nextCount;
       emitProgress("merkle", level + 1, levels.length - 1, attempt - 1);
@@ -294,8 +372,9 @@ const computeCommit = async () => {
     if (hashcashBits > 0) {
       hashcashIn.set(rootBytes, hashcashDataOffset);
       hashcashIn.set(chainBuf.subarray(L * 32, L * 32 + 32), hashcashDataOffset + 32);
-      const digest = await crypto.subtle.digest("SHA-256", hashcashIn);
-      if (leadingZeroBits(new Uint8Array(digest)) < hashcashBits) {
+      const digest = await sha256Bytes(hashcashIn);
+      if (leadingZeroBits(digest) < hashcashBits) {
+
         emitProgress("hashcash", 0, 0, attempt);
         if (shouldYield(attempt, yieldEvery)) {
           await sleep0();

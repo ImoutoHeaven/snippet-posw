@@ -419,12 +419,16 @@ const runPowFlow = async (
   }
   const powBinding = turnToken ? `${authBinding}|${await tbFromToken(turnToken)}` : authBinding;
 
-  const workerCode = await fetch(workerUrl).then(r => r.text());
+  const workerCode = await fetch(workerUrl).then((r) => r.text());
   const blob = new Blob([workerCode], { type: "application/javascript" });
   const blobUrl = URL.createObjectURL(blob);
-  const worker = new Worker(blobUrl, { type: "module" });
   let spinTimer;
   let verifySpinTimer;
+  let worker = null;
+  let rpc = null;
+  let rpcs = [];
+  let extraWorkers = [];
+  let didCommit = false;
   try {
     let spinIndex = -1;
     let spinFrame = 0;
@@ -435,7 +439,9 @@ const runPowFlow = async (
     const verifySpinChars = "|/-\\";
     let verifyBaseMsg = "";
 
-    const rpc = createWorkerRpc(worker, (progress) => {
+    let activeWorker = null;
+    const onProgress = (source, progress) => {
+      if (source !== activeWorker) return;
       if (progress.phase === "chain" && spinIndex === -1) {
         spinIndex = log("Computing hash chain...");
         spinTimer = setInterval(() => {
@@ -443,39 +449,102 @@ const runPowFlow = async (
           if (attemptCount > 0) {
             msg = "Screening hash (attempt " + attemptCount + ")...";
           }
-          const spinner = '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
+          const spinner =
+            '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
           update(spinIndex, msg + " " + spinner);
         }, 120);
       }
       if (progress.phase === "hashcash" && typeof progress.attempt === "number") {
         attemptCount = progress.attempt;
       }
-    });
+    };
 
-    await rpc.call("INIT", {
+    const makeWorkerRpc = () => {
+      const workerInstance = new Worker(blobUrl, { type: "module" });
+      const workerRpc = createWorkerRpc(workerInstance, (progress) =>
+        onProgress(workerInstance, progress)
+      );
+      workerRpc.worker = workerInstance;
+      return workerRpc;
+    };
+
+    const raceFirstSuccess = (promises) =>
+      new Promise((resolve, reject) => {
+        let pending = promises.length;
+        if (pending === 0) {
+          reject(new Error("No workers"));
+          return;
+        }
+        let lastError;
+        for (const promise of promises) {
+          Promise.resolve(promise)
+            .then(resolve)
+            .catch((err) => {
+              lastError = err;
+              pending -= 1;
+              if (pending === 0) {
+                reject(lastError || new Error("Commit failed"));
+              }
+            });
+        }
+      });
+
+    const initPayload = {
       bindingString: powBinding,
       steps,
       hashcashBits,
       segmentLen,
       yieldEvery: 1024,
       progressEvery: 1024,
-    });
+    };
 
-    const commitRes = await rpc.call("COMMIT");
+    const workerCount = Number(hashcashBits) >= 2 ? 4 : 1;
+    rpcs = [];
+    for (let i = 0; i < workerCount; i++) {
+      const wRpc = makeWorkerRpc();
+      await wRpc.call("INIT", initPayload);
+      rpcs.push(wRpc);
+    }
+
+    const raceRpcs = workerCount > 1 ? rpcs : rpcs.slice(0, 1);
+    if (raceRpcs.length === 0) throw new Error("Worker Missing");
+
+    activeWorker = raceRpcs[0].worker;
+
+    const commitRes = await raceFirstSuccess(
+      raceRpcs.map((entry, index) =>
+        entry
+          .call("COMMIT")
+          .then((result) => ({ result, index }))
+      )
+    );
+
+    didCommit = true;
+    const winner = raceRpcs[commitRes.index];
+    worker = winner.worker;
+    rpc = winner;
+    activeWorker = winner.worker;
+
+    extraWorkers = raceRpcs.filter((entry, idx) => idx !== commitRes.index);
+    for (const extra of extraWorkers) {
+      extra.dispose();
+    }
+
     if (spinTimer) clearInterval(spinTimer);
     if (spinIndex !== -1) {
-      const doneText = attemptCount > 0
-        ? "Screening hash... <span class=\"green\">done</span>"
-        : "Computing hash chain... <span class=\"green\">done</span>";
+      const doneText =
+        attemptCount > 0
+          ? "Screening hash... <span class=\"green\">done</span>"
+          : "Computing hash chain... <span class=\"green\">done</span>";
       update(spinIndex, doneText);
     }
 
     log("Submitting commit...");
     const commitBody = {
       ticketB64,
-      rootB64: commitRes.rootB64,
+      rootB64: commitRes.result.rootB64,
       pathHash,
-      nonce: commitRes.nonce,
+      nonce: commitRes.result.nonce,
     };
     if (turnToken) commitBody.token = turnToken;
     await postJson(apiPrefix + "/commit", commitBody);
@@ -502,7 +571,8 @@ const runPowFlow = async (
       if (verifyLine === -1) {
         verifyLine = log(verifyBaseMsg);
         verifySpinTimer = setInterval(() => {
-          const spinner = '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + "</span>";
+          const spinner =
+            '<span class="yellow">' + verifySpinChars[verifySpinFrame++ % verifySpinChars.length] + "</span>";
           update(verifyLine, verifyBaseMsg + " " + spinner);
         }, 120);
       }
@@ -540,14 +610,31 @@ const runPowFlow = async (
     if (verifySpinTimer) clearInterval(verifySpinTimer);
     if (verifyLine !== -1) update(verifyLine, "Verifying... <span class=\"green\">done</span>");
     log("PoW... <span class=\"green\">done</span>");
-    rpc.dispose();
     return state;
   } finally {
     if (spinTimer) clearInterval(spinTimer);
     if (verifySpinTimer) clearInterval(verifySpinTimer);
-    worker.terminate();
+    for (const extra of extraWorkers) {
+      try {
+        extra.dispose();
+      } catch {}
+    }
+    if (rpc) {
+      try {
+        rpc.dispose();
+      } catch {}
+    }
+    if (worker) worker.terminate();
+    for (const entry of rpcs) {
+      if (entry && entry.worker && entry.worker !== worker) {
+        try {
+          entry.worker.terminate();
+        } catch {}
+      }
+    }
     URL.revokeObjectURL(blobUrl);
   }
+
 };
 
 export default async function runPow(
