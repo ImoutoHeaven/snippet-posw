@@ -15,8 +15,6 @@ const I18N = {
     title_redirecting: "Redirecting...",
     title_done: "Done",
     title_failed: "Failed",
-    ticker_text:
-      "This process is automatic unless turnstile asks you to click the box, you will be redirected after verification is done.",
     initializing: "Initializing...",
     connection_retry: "Connection error. Retrying in {ms}ms...",
     request_failed: "Request Failed",
@@ -66,7 +64,6 @@ const I18N = {
     title_redirecting: "正在跳转...",
     title_done: "完成",
     title_failed: "失败",
-    ticker_text: "此过程全自动，除非 Turnstile 要求你勾选，否则验证完成后会自动跳转。",
     initializing: "初始化中...",
     connection_retry: "连接错误，{ms}ms 后重试...",
     request_failed: "请求失败",
@@ -116,8 +113,6 @@ const I18N = {
     title_redirecting: "リダイレクト中...",
     title_done: "完了",
     title_failed: "失敗",
-    ticker_text:
-      "この処理は自動です。Turnstile がチェックを求める場合を除き、検証完了後に自動でリダイレクトされます。",
     initializing: "初期化中...",
     connection_retry: "接続エラー。{ms}ms 後に再試行します...",
     request_failed: "リクエスト失敗",
@@ -412,24 +407,21 @@ const initUi = () => {
     "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font);display:flex;justify-content:center;align-items:center;-webkit-font-smoothing:antialiased;}",
     "body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(var(--glow-r),var(--glow-g),var(--glow-b),0.35),transparent 55%),radial-gradient(circle at calc(100% - var(--glow-x)) calc(100% - var(--glow-y)), rgba(var(--glow-r),var(--glow-g),var(--glow-b),0.2),transparent 55%);opacity:var(--breathe-opacity);}",
     "body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse var(--glow-h-width-top,6.75%) var(--glow-v-height-top,18px) at var(--glow-x) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-top)) 0%,transparent 70%) top/100% var(--glow-v-height-top,18px) no-repeat,radial-gradient(ellipse var(--glow-h-width-bottom,6.75%) var(--glow-v-height-bottom,18px) at var(--glow-x) 100%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-bottom)) 0%,transparent 70%) bottom/100% var(--glow-v-height-bottom,18px) no-repeat,radial-gradient(ellipse var(--glow-h-width-left,18px) var(--glow-v-height-left,6.75%) at 0% var(--glow-y),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-left)) 0%,transparent 70%) left/var(--glow-h-width-left,18px) 100% no-repeat,radial-gradient(ellipse var(--glow-h-width-right,18px) var(--glow-v-height-right,6.75%) at 100% var(--glow-y),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-right)) 0%,transparent 70%) right/var(--glow-h-width-right,18px) 100% no-repeat;}",
-    ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);position:relative;z-index:1;}",
+    ".card{background:rgba(15,23,42,0.4);border:1px solid rgba(148,163,184,0.2);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease,border-color 0.2s ease;backdrop-filter:blur(12px) saturate(130%);-webkit-backdrop-filter:blur(12px) saturate(130%);position:relative;z-index:1;}",
+    ".card::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;border-radius:inherit;background:radial-gradient(ellipse var(--elem-glow-h-width-top,15%) 1px at var(--elem-glow-x,50%) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-top,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-top,0) * 0.3)) 50%,transparent 100%) top/100% 1px no-repeat,radial-gradient(ellipse var(--elem-glow-h-width-bottom,15%) 1px at var(--elem-glow-x,50%) 100%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-bottom,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-bottom,0) * 0.3)) 50%,transparent 100%) bottom/100% 1px no-repeat,radial-gradient(ellipse 1px var(--elem-glow-v-height-left,15%) at 0% var(--elem-glow-y,50%),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-left,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-left,0) * 0.3)) 50%,transparent 100%) left/1px 100% no-repeat,radial-gradient(ellipse 1px var(--elem-glow-v-height-right,15%) at 100% var(--elem-glow-y,50%),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-right,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-right,0) * 0.3)) 50%,transparent 100%) right/1px 100% no-repeat;}",
     "h1{margin:0 0 24px;font-size:15px;font-weight:500;color:var(--accent);letter-spacing:-0.01em;}",
     "#t.shine{color:transparent;background-image:linear-gradient(90deg,#c4c4c9 0%,#ffffff 50%,#c4c4c9 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:title-shine 3.2s ease-in-out infinite;}",
-    "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
+    "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;background:rgba(15,23,42,0.4);border:1px solid rgba(148,163,184,0.2);border-radius:0.75rem;padding:1rem;backdrop-filter:blur(12px) saturate(130%);-webkit-backdrop-filter:blur(12px) saturate(130%);}",
+    "#log::after{content:'';position:absolute;top:0;left:0;right:0;bottom:0;pointer-events:none;border-radius:inherit;background:radial-gradient(ellipse var(--elem-glow-h-width-top,15%) 1px at var(--elem-glow-x,50%) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-top,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-top,0) * 0.3)) 50%,transparent 100%) top/100% 1px no-repeat,radial-gradient(ellipse var(--elem-glow-h-width-bottom,15%) 1px at var(--elem-glow-x,50%) 100%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-bottom,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-bottom,0) * 0.3)) 50%,transparent 100%) bottom/100% 1px no-repeat,radial-gradient(ellipse 1px var(--elem-glow-v-height-left,15%) at 0% var(--elem-glow-y,50%),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-left,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-left,0) * 0.3)) 50%,transparent 100%) left/1px 100% no-repeat,radial-gradient(ellipse 1px var(--elem-glow-v-height-right,15%) at 100% var(--elem-glow-y,50%),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--elem-reflect-right,0)) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),calc(var(--elem-reflect-right,0) * 0.3)) 50%,transparent 100%) right/1px 100% no-repeat;}",
     "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);position:relative;z-index:2;}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
-    "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.8);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
-    "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.08em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
-    "@keyframes title-shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}",
-    "@keyframes scroll-left{from{transform:translate(100vw,-50%);}to{transform:translate(-100%,-50%);}}"
+    "@keyframes title-shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}"
   ].join("");
   (document.head || document.documentElement).appendChild(style);
   const titleText = t("title_verifying");
-  const tickerText = t("ticker_text");
   document.body.innerHTML =
-    `<div class="card"><h1 id="t" class="shine">${titleText}</h1><div id="log"></div><div id="ts"></div></div>` +
-    `<div id="ticker"><div id="ticker-text">${tickerText}</div></div>`;
+    `<div class="card"><h1 id="t" class="shine">${titleText}</h1><div id="log"></div><div id="ts"></div></div>`;
 
   // --- Advanced Glow Effect Implementation (from landing) ---
   const glowState = {
@@ -898,8 +890,6 @@ const initUi = () => {
     logEl: document.getElementById("log"),
     tEl: document.getElementById("t"),
     tsEl: document.getElementById("ts"),
-    tickerEl: document.getElementById("ticker"),
-    tickerTextEl: document.getElementById("ticker-text"),
   };
 };
 
@@ -907,23 +897,6 @@ const ui = initUi();
 const lines = [];
 const MAX_VISIBLE_LINES = 6;
 document.title = t("title_verifying");
-
-// Start ticker animation after 1.5 seconds
-setTimeout(() => {
-  if (ui.tickerEl && ui.tickerTextEl) {
-    ui.tickerEl.classList.add("show");
-    ui.tickerTextEl.classList.add("scrolling");
-
-    // Hide ticker after animation completes
-    ui.tickerTextEl.addEventListener("animationend", () => {
-      ui.tickerEl.classList.remove("show");
-      ui.tickerEl.classList.add("hide");
-      setTimeout(() => {
-        ui.tickerEl.style.display = "none";
-      }, 600);
-    }, { once: true });
-  }
-}, 1500);
 
 const render = () => {
   const total = lines.length;
