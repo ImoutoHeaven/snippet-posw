@@ -408,15 +408,17 @@ const createWorkerRpc = (worker, onProgress) => {
 const initUi = () => {
   const style = document.createElement("style");
   style.textContent = [
-    ":root{--bg:#09090b;--card-bg:#18181b;--border:#27272a;--text:#e4e4e7;--sub:#a1a1aa;--accent:#fff;--yellow:#fbbf24;--green:#4ade80;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;--mono:ui-monospace,'SFMono-Regular',Menlo,Monaco,Consolas,monospace;}",
+    ":root{--bg:#050607;--card-bg:rgba(24,24,27,0.75);--border:rgba(255,255,255,0.1);--text:#f4f4f8;--sub:#9ca3af;--accent:#fff;--yellow:#fbbf24;--green:#4ade80;--font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;--mono:ui-monospace,'SFMono-Regular',Menlo,Monaco,Consolas,monospace;--glow-x:50%;--glow-y:0%;--glow-r:62;--glow-g:110;--glow-b:255;--breathe-opacity:1;--reflect-top:0;--reflect-bottom:0;--reflect-left:0;--reflect-right:0;}",
     "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font);display:flex;justify-content:center;align-items:center;-webkit-font-smoothing:antialiased;}",
-    ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 0 0 1px rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease;}",
+    "body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(circle at var(--glow-x) var(--glow-y), rgba(var(--glow-r),var(--glow-g),var(--glow-b),0.35),transparent 55%),radial-gradient(circle at calc(100% - var(--glow-x)) calc(100% - var(--glow-y)), rgba(var(--glow-r),var(--glow-g),var(--glow-b),0.2),transparent 55%);opacity:var(--breathe-opacity);}",
+    "body::after{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;background:radial-gradient(ellipse var(--glow-h-width-top,6.75%) var(--glow-v-height-top,18px) at var(--glow-x) 0%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-top)) 0%,transparent 70%) top/100% var(--glow-v-height-top,18px) no-repeat,radial-gradient(ellipse var(--glow-h-width-bottom,6.75%) var(--glow-v-height-bottom,18px) at var(--glow-x) 100%,rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-bottom)) 0%,transparent 70%) bottom/100% var(--glow-v-height-bottom,18px) no-repeat,radial-gradient(ellipse var(--glow-h-width-left,18px) var(--glow-v-height-left,6.75%) at 0% var(--glow-y),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-left)) 0%,transparent 70%) left/var(--glow-h-width-left,18px) 100% no-repeat,radial-gradient(ellipse var(--glow-h-width-right,18px) var(--glow-v-height-right,6.75%) at 100% var(--glow-y),rgba(var(--glow-r),var(--glow-g),var(--glow-b),var(--reflect-right)) 0%,transparent 70%) right/var(--glow-h-width-right,18px) 100% no-repeat;}",
+    ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 8px 32px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease;backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);position:relative;z-index:1;}",
     "h1{margin:0 0 24px;font-size:15px;font-weight:500;color:var(--accent);letter-spacing:-0.01em;}",
     "#t.shine{color:transparent;background-image:linear-gradient(90deg,#c4c4c9 0%,#ffffff 50%,#c4c4c9 100%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:title-shine 3.2s ease-in-out infinite;}",
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
-    "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
+    "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);position:relative;z-index:2;}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
-    "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.98);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
+    "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.8);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
     "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.08em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
     "@keyframes title-shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}",
@@ -428,6 +430,89 @@ const initUi = () => {
   document.body.innerHTML =
     `<div class="card"><h1 id="t" class="shine">${titleText}</h1><div id="log"></div><div id="ts"></div></div>` +
     `<div id="ticker"><div id="ticker-text">${tickerText}</div></div>`;
+
+  // --- Glow Effect Implementation ---
+  const colorTable = [
+    { r: 62, g: 110, b: 255 }, { r: 0, g: 191, b: 255 }, { r: 64, g: 224, b: 208 },
+    { r: 138, g: 43, b: 226 }, { r: 147, g: 51, b: 234 }, { r: 199, g: 21, b: 133 },
+    { r: 255, g: 20, b: 147 }, { r: 72, g: 61, b: 139 }
+  ];
+  let curColorIdx = Math.floor(Math.random() * colorTable.length);
+  let nextColorIdx = (curColorIdx + 1) % colorTable.length;
+  let colorPhase = 0;
+  let breathePhase = 0;
+  let glowX = 0.5, glowY = 0.1;
+  let targetX = Math.random(), targetY = Math.random() * 0.3;
+  let lastTime = Date.now();
+
+  const updateGlow = () => {
+    const now = Date.now();
+    const dt = Math.min(0.1, (now - lastTime) / 1000);
+    lastTime = now;
+
+    // Wander
+    glowX += (targetX - glowX) * dt * 0.5;
+    glowY += (targetY - glowY) * dt * 0.5;
+    if (Math.abs(glowX - targetX) < 0.01) {
+      targetX = Math.random();
+      targetY = Math.random() * 0.3;
+    }
+
+    // Color
+    colorPhase += dt * 0.05;
+    if (colorPhase >= 1) {
+      colorPhase = 0;
+      curColorIdx = nextColorIdx;
+      nextColorIdx = (curColorIdx + 1) % colorTable.length;
+    }
+    const c1 = colorTable[curColorIdx], c2 = colorTable[nextColorIdx];
+    const r = Math.round(c1.r + (c2.r - c1.r) * colorPhase);
+    const g = Math.round(c1.g + (c2.g - c1.g) * colorPhase);
+    const b = Math.round(c1.b + (c2.b - c1.b) * colorPhase);
+
+    // Breathe
+    breathePhase += dt * 0.2;
+    const opacity = 0.7 + 0.3 * Math.sin(breathePhase * Math.PI * 2);
+
+    // Reflect calculations
+    const radius = 0.55, coeff = 0.6, threshold = 0.3;
+    const pTop = glowY < threshold ? Math.pow(1 - glowY / threshold, 2) : 0;
+    const pBottom = glowY > (1 - threshold) ? Math.pow((glowY - (1 - threshold)) / threshold, 2) : 0;
+    const pLeft = glowX < threshold ? Math.pow(1 - glowX / threshold, 2) : 0;
+    const pRight = glowX > (1 - threshold) ? Math.pow((glowX - (1 - threshold)) / threshold, 2) : 0;
+
+    const refT = Math.max(0, 1 - glowY / radius) * coeff * pTop;
+    const refB = Math.max(0, 1 - (1 - glowY) / radius) * coeff * pBottom;
+    const refL = Math.max(0, 1 - glowX / radius) * coeff * pLeft;
+    const refR = Math.max(0, 1 - (1 - glowX) / radius) * coeff * pRight;
+
+    const s = document.body.style;
+    s.setProperty('--glow-x', (glowX * 100).toFixed(1) + '%');
+    s.setProperty('--glow-y', (glowY * 100).toFixed(1) + '%');
+    s.setProperty('--glow-r', r); s.setProperty('--glow-g', g); s.setProperty('--glow-b', b);
+    s.setProperty('--breathe-opacity', opacity.toFixed(3));
+    s.setProperty('--reflect-top', refT.toFixed(3));
+    s.setProperty('--reflect-bottom', refB.toFixed(3));
+    s.setProperty('--reflect-left', refL.toFixed(3));
+    s.setProperty('--reflect-right', refR.toFixed(3));
+    s.setProperty('--glow-h-width-top', (6.75 + refT * 11.25) + '%');
+    s.setProperty('--glow-v-height-top', (18 + refT * 54) + 'px');
+    s.setProperty('--glow-h-width-bottom', (6.75 + refB * 11.25) + '%');
+    s.setProperty('--glow-v-height-bottom', (18 + refB * 54) + 'px');
+    s.setProperty('--glow-h-width-left', (18 + refL * 54) + 'px');
+    s.setProperty('--glow-v-height-left', (6.75 + refL * 11.25) + '%');
+    s.setProperty('--glow-h-width-right', (18 + refR * 54) + 'px');
+    s.setProperty('--glow-v-height-right', (6.75 + refR * 11.25) + '%');
+
+    requestAnimationFrame(updateGlow);
+  };
+
+  requestAnimationFrame(updateGlow);
+  document.addEventListener('mousemove', (e) => {
+    targetX = e.clientX / window.innerWidth;
+    targetY = e.clientY / window.innerHeight;
+  });
+
   return {
     logEl: document.getElementById("log"),
     tEl: document.getElementById("t"),
