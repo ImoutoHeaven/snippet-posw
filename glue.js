@@ -412,19 +412,21 @@ const initUi = () => {
     "html,body{margin:0;padding:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--font);display:flex;justify-content:center;align-items:center;-webkit-font-smoothing:antialiased;}",
     ".card{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:32px;width:90%;max-width:360px;text-align:center;box-shadow:0 0 0 1px rgba(255,255,255,0.05),0 4px 12px rgba(0,0,0,0.4);animation:fade-in 0.6s cubic-bezier(0.16,1,0.3,1) both;transition:height 0.3s ease;}",
     "h1{margin:0 0 24px;font-size:15px;font-weight:500;color:var(--accent);letter-spacing:-0.01em;}",
+    "#t.shine{color:transparent;background-image:linear-gradient(90deg,#c4c4c9 0%,#ffffff 20%,#c4c4c9 40%,#ffffff 60%,#c4c4c9 80%);background-size:200% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;animation:title-shine 1.6s ease-in-out infinite;}",
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;}",
     "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
     "#ticker{position:fixed;bottom:0;left:0;width:100%;height:28px;background:rgba(39,39,42,0.98);border-top:1px solid var(--border);overflow:hidden;z-index:1000;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);opacity:0;transition:opacity 0.6s ease;}#ticker.show{opacity:1;}#ticker.hide{opacity:0;}",
     "#ticker-text{position:absolute;top:50%;white-space:nowrap;font-size:12px;color:var(--sub);letter-spacing:0.08em;font-family:var(--font);}#ticker-text.scrolling{animation:scroll-left 18s linear forwards;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
+    "@keyframes title-shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}",
     "@keyframes scroll-left{from{transform:translate(100vw,-50%);}to{transform:translate(-100%,-50%);}}"
   ].join("");
   (document.head || document.documentElement).appendChild(style);
   const titleText = t("title_verifying");
   const tickerText = t("ticker_text");
   document.body.innerHTML =
-    `<div class="card"><h1 id="t">${titleText}</h1><div id="log"></div><div id="ts"></div></div>` +
+    `<div class="card"><h1 id="t" class="shine">${titleText}</h1><div id="log"></div><div id="ts"></div></div>` +
     `<div id="ticker"><div id="ticker-text">${tickerText}</div></div>`;
   return {
     logEl: document.getElementById("log"),
@@ -479,6 +481,9 @@ const update = (idx, msg) => {
 };
 
 const setStatus = (ok) => {
+  if (ui.tEl && ui.tEl.classList && typeof ui.tEl.classList.remove === "function") {
+    ui.tEl.classList.remove("shine");
+  }
   if (ok) {
     ui.tEl.textContent = t("title_redirecting");
     ui.tEl.style.color = "#4ade80";

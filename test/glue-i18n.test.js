@@ -63,3 +63,7 @@ test("translate returns localized text and formats variables", () => {
 test("translate falls back to key when missing", () => {
   assert.equal(glue.translate("ja", "missing_key"), "missing_key");
 });
+
+test("title uses shine class while verifying", () => {
+  assert.match(document.body.innerHTML, /id="t"[^>]*class="[^"]*shine/);
+});
