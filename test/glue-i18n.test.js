@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 const setupDom = () => {
   const makeEl = () => ({
-    style: {},
+    style: { setProperty() {} },
     classList: { add() {}, remove() {} },
     appendChild() {},
     addEventListener() {},
@@ -22,14 +22,18 @@ const setupDom = () => {
     title: "",
     head: { appendChild() {} },
     documentElement: { appendChild() {} },
-    body: { innerHTML: "", appendChild() {} },
+    body: { innerHTML: "", appendChild() {}, style: { setProperty() {} } },
     createElement: () => makeEl(),
     getElementById: (id) => getEl(id),
+    querySelectorAll: () => [],
+    addEventListener() {},
   };
   globalThis.window = {
     location: { href: "https://example.com/", replace() {}, reload() {} },
     parent: null,
     opener: null,
+    innerWidth: 1200,
+    innerHeight: 800,
   };
   globalThis.window.parent = globalThis.window;
   Object.defineProperty(globalThis, "navigator", {
@@ -37,7 +41,7 @@ const setupDom = () => {
     configurable: true,
   });
   globalThis.setTimeout = (fn) => 0;
-  globalThis.requestAnimationFrame = (fn) => fn();
+  globalThis.requestAnimationFrame = () => 0;
 };
 
 setupDom();

@@ -231,9 +231,17 @@ const ERROR_KEY_BY_MESSAGE = {
   "Worker message error": "worker_message_error",
 };
 
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
 const localizeErrorMessage = (message) => {
   const key = ERROR_KEY_BY_MESSAGE[message];
-  return key ? t(key) : message;
+  return escapeHtml(key ? t(key) : message);
 };
 
 const encoder = new TextEncoder();
@@ -951,7 +959,10 @@ const loadTurnstile = () => {
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.turnstile);
-    script.onerror = () => reject(new Error("Turnstile Load Failed"));
+    script.onerror = () => {
+      turnstilePromise = null;
+      reject(new Error("Turnstile Load Failed"));
+    };
     (document.head || document.documentElement).appendChild(script);
   });
   return turnstilePromise;
@@ -1182,7 +1193,14 @@ const runPowFlow = async (
     rpcs = [];
     for (let i = 0; i < workerCount; i++) {
       const wRpc = makeWorkerRpc();
-      await wRpc.call("INIT", initPayload);
+      try {
+        await wRpc.call("INIT", initPayload);
+      } catch (err) {
+        try {
+          wRpc.dispose();
+        } catch {}
+        throw err;
+      }
       rpcs.push(wRpc);
     }
 
