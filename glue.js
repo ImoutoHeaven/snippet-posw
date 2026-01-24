@@ -431,87 +431,468 @@ const initUi = () => {
     `<div class="card"><h1 id="t" class="shine">${titleText}</h1><div id="log"></div><div id="ts"></div></div>` +
     `<div id="ticker"><div id="ticker-text">${tickerText}</div></div>`;
 
-  // --- Glow Effect Implementation ---
-  const colorTable = [
-    { r: 62, g: 110, b: 255 }, { r: 0, g: 191, b: 255 }, { r: 64, g: 224, b: 208 },
-    { r: 138, g: 43, b: 226 }, { r: 147, g: 51, b: 234 }, { r: 199, g: 21, b: 133 },
-    { r: 255, g: 20, b: 147 }, { r: 72, g: 61, b: 139 }
-  ];
-  let curColorIdx = Math.floor(Math.random() * colorTable.length);
-  let nextColorIdx = (curColorIdx + 1) % colorTable.length;
-  let colorPhase = 0;
-  let breathePhase = 0;
-  let glowX = 0.5, glowY = 0.1;
-  let targetX = Math.random(), targetY = Math.random() * 0.3;
-  let lastTime = Date.now();
+  // --- Advanced Glow Effect Implementation (from landing) ---
+  const glowState = {
+    // Animation frame
+    glowAnimationFrame: null,
+    lastFrameTime: Date.now(),
 
-  const updateGlow = () => {
-    const now = Date.now();
-    const dt = Math.min(0.1, (now - lastTime) / 1000);
-    lastTime = now;
+    // Position and movement
+    currentGlowX: 0.5,
+    currentGlowY: 0,
+    targetGlowX: 0.5,
+    targetGlowY: 0,
+    currentSpeedX: 0,
+    currentSpeedY: 0,
 
-    // Wander
-    glowX += (targetX - glowX) * dt * 0.5;
-    glowY += (targetY - glowY) * dt * 0.5;
-    if (Math.abs(glowX - targetX) < 0.01) {
-      targetX = Math.random();
-      targetY = Math.random() * 0.3;
+    // Mode control
+    isAutoGlow: true,
+    isResting: false,
+    restStartTime: 0,
+    currentRestDuration: Math.random() * 8000,
+
+    // Mouse tracking
+    latestMouseX: 0,
+    latestMouseY: 0,
+    lastMouseSampleTime: 0,
+    mouseIdleTimer: null,
+    MOUSE_SAMPLE_INTERVAL: 1000,
+
+    // Visibility management
+    visibilityTimer: null,
+    isRenderingStopped: false,
+    fadeInPhase: 1,
+    FADE_IN_DURATION: 2.5,
+
+    // Color system
+    colorTable: [
+      { r: 62, g: 110, b: 255 },
+      { r: 0, g: 191, b: 255 },
+      { r: 64, g: 224, b: 208 },
+      { r: 138, g: 43, b: 226 },
+      { r: 147, g: 51, b: 234 },
+      { r: 199, g: 21, b: 133 },
+      { r: 255, g: 20, b: 147 },
+      { r: 72, g: 61, b: 139 }
+    ],
+    currentColorIndex: 0,
+    targetColorIndex: 1,
+    colorTransitionPhase: Math.random(),
+    colorTransitionDuration: 0,
+
+    // Breathing animation
+    breathePhase: Math.random(),
+    breatheCycleDuration: 0,
+    breatheMinOpacity: 0,
+    breatheMaxOpacity: 0,
+    targetBreatheCycleDuration: 0,
+    targetBreatheMinOpacity: 0,
+    targetBreatheMaxOpacity: 0,
+    BREATHE_SMOOTHING_SPEED: 1.8,
+
+    // Speed system
+    MAX_SPEED: 0.08,
+    WANDER_ACCELERATION: 0.12,
+    MOUSE_ACCELERATION: 0.04,
+    WANDER_REACHED_THRESHOLD: 0.01,
+
+    // Helper functions
+    getRandomBreatheMin() {
+      return 0.5 + Math.random() * 0.2;
+    },
+
+    getRandomBreatheMax() {
+      return 1.0 + Math.random() * 0.2;
+    },
+
+    getRandomBreatheDuration() {
+      return 2 + Math.random() * 10;
+    },
+
+    getRandomColorIndex() {
+      return Math.floor(Math.random() * this.colorTable.length);
+    },
+
+    getNextColorIndex(excludeIndex) {
+      if (this.colorTable.length <= 1) return excludeIndex;
+      let nextIndex = this.getRandomColorIndex();
+      while (nextIndex === excludeIndex) {
+        nextIndex = this.getRandomColorIndex();
+      }
+      return nextIndex;
+    },
+
+    getRandomColorTransitionDuration() {
+      return 10 + Math.random() * 35;
+    },
+
+    getRandomWanderTarget() {
+      return {
+        x: 0.1 + Math.random() * 0.8,
+        y: 0.05 + Math.random() * 0.2
+      };
+    },
+
+    syncBreatheOpacity() {
+      const body = document.body;
+      if (!body) return;
+      const breatheValue = 0.5 + 0.5 * Math.sin(this.breathePhase * Math.PI * 2 - Math.PI / 2);
+      const currentOpacity = this.breatheMinOpacity + (this.breatheMaxOpacity - this.breatheMinOpacity) * breatheValue;
+      body.style.setProperty('--breathe-opacity', (currentOpacity * this.fadeInPhase).toFixed(3));
+    },
+
+    applyGlowColor() {
+      const body = document.body;
+      if (!body) return;
+      const currentColor = this.colorTable[this.currentColorIndex] || this.colorTable[0];
+      const targetColor = this.colorTable[this.targetColorIndex] || currentColor;
+      const r = Math.round(currentColor.r + (targetColor.r - currentColor.r) * this.colorTransitionPhase);
+      const g = Math.round(currentColor.g + (targetColor.g - currentColor.g) * this.colorTransitionPhase);
+      const b = Math.round(currentColor.b + (targetColor.b - currentColor.b) * this.colorTransitionPhase);
+      body.style.setProperty('--glow-r', r);
+      body.style.setProperty('--glow-g', g);
+      body.style.setProperty('--glow-b', b);
+    },
+
+    updateElementsEdgeGlow(glowX, glowY) {
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const elements = document.querySelectorAll('.card, #log');
+
+      elements.forEach(element => {
+        const rect = element.getBoundingClientRect();
+        const relativeX = ((glowX - rect.left) / rect.width) * 100;
+        const relativeY = ((glowY - rect.top) / rect.height) * 100;
+
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const dx = glowX - centerX;
+        const dy = glowY - centerY;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+
+        const maxDistance = Math.sqrt(w * w + h * h) * 0.5;
+        const normalizedDistance = distance / maxDistance;
+
+        const ELEMENT_GLOW_RADIUS = 0.4;
+        const ELEMENT_MAX_INTENSITY = 0.2;
+        const ELEMENT_REFLECTION_COEFFICIENT = 0.7;
+
+        const baseIntensity = Math.max(0, 1 - normalizedDistance / ELEMENT_GLOW_RADIUS) * ELEMENT_MAX_INTENSITY;
+
+        const distToTop = Math.abs(glowY - rect.top) / rect.height;
+        const distToBottom = Math.abs(glowY - rect.bottom) / rect.height;
+        const distToLeft = Math.abs(glowX - rect.left) / rect.width;
+        const distToRight = Math.abs(glowX - rect.right) / rect.width;
+
+        const edgeThreshold = 2.0;
+        const proximityTop = distToTop < edgeThreshold ? Math.pow(1 - distToTop / edgeThreshold, 1.5) : 0;
+        const proximityBottom = distToBottom < edgeThreshold ? Math.pow(1 - distToBottom / edgeThreshold, 1.5) : 0;
+        const proximityLeft = distToLeft < edgeThreshold ? Math.pow(1 - distToLeft / edgeThreshold, 1.5) : 0;
+        const proximityRight = distToRight < edgeThreshold ? Math.pow(1 - distToRight / edgeThreshold, 1.5) : 0;
+
+        const reflectTop = baseIntensity * ELEMENT_REFLECTION_COEFFICIENT * proximityTop;
+        const reflectBottom = baseIntensity * ELEMENT_REFLECTION_COEFFICIENT * proximityBottom;
+        const reflectLeft = baseIntensity * ELEMENT_REFLECTION_COEFFICIENT * proximityLeft;
+        const reflectRight = baseIntensity * ELEMENT_REFLECTION_COEFFICIENT * proximityRight;
+
+        element.style.setProperty('--elem-glow-x', relativeX.toFixed(2) + '%');
+        element.style.setProperty('--elem-glow-y', relativeY.toFixed(2) + '%');
+        element.style.setProperty('--elem-reflect-top', reflectTop.toFixed(3));
+        element.style.setProperty('--elem-reflect-bottom', reflectBottom.toFixed(3));
+        element.style.setProperty('--elem-reflect-left', reflectLeft.toFixed(3));
+        element.style.setProperty('--elem-reflect-right', reflectRight.toFixed(3));
+
+        const baseWidth = 10;
+        const maxWidth = 30;
+        const glowHWidthTop = baseWidth + reflectTop * (maxWidth - baseWidth);
+        const glowHWidthBottom = baseWidth + reflectBottom * (maxWidth - baseWidth);
+        const glowVHeightLeft = baseWidth + reflectLeft * (maxWidth - baseWidth);
+        const glowVHeightRight = baseWidth + reflectRight * (maxWidth - baseWidth);
+
+        element.style.setProperty('--elem-glow-h-width-top', glowHWidthTop + '%');
+        element.style.setProperty('--elem-glow-h-width-bottom', glowHWidthBottom + '%');
+        element.style.setProperty('--elem-glow-v-height-left', glowVHeightLeft + '%');
+        element.style.setProperty('--elem-glow-v-height-right', glowVHeightRight + '%');
+      });
+    },
+
+    updateGlowPosition(x, y) {
+      const xPercent = (x / window.innerWidth * 100).toFixed(1);
+      const yPercent = (y / window.innerHeight * 100).toFixed(1);
+      document.body.style.setProperty('--glow-x', xPercent + '%');
+      document.body.style.setProperty('--glow-y', yPercent + '%');
+      this.currentGlowX = x / window.innerWidth;
+      this.currentGlowY = y / window.innerHeight;
+
+      const normalizedX = Math.max(0, Math.min(1, this.currentGlowX));
+      const normalizedY = Math.max(0, Math.min(1, this.currentGlowY));
+
+      const GLOW_MAX_INTENSITY = 0.35;
+      const GLOW_RADIUS = 0.55;
+      const REFLECTION_COEFFICIENT = 0.6;
+
+      const distanceToTop = normalizedY;
+      const distanceToBottom = 1 - normalizedY;
+      const distanceToLeft = normalizedX;
+      const distanceToRight = 1 - normalizedX;
+
+      const glowIntensityAtTop = GLOW_MAX_INTENSITY * Math.max(0, 1 - distanceToTop / GLOW_RADIUS);
+      const glowIntensityAtBottom = GLOW_MAX_INTENSITY * Math.max(0, 1 - distanceToBottom / GLOW_RADIUS);
+      const glowIntensityAtLeft = GLOW_MAX_INTENSITY * Math.max(0, 1 - distanceToLeft / GLOW_RADIUS);
+      const glowIntensityAtRight = GLOW_MAX_INTENSITY * Math.max(0, 1 - distanceToRight / GLOW_RADIUS);
+
+      const edgeThreshold = 0.3;
+      const proximityTop = normalizedY < edgeThreshold ? Math.pow(1 - normalizedY / edgeThreshold, 2) : 0;
+      const proximityBottom = normalizedY > (1 - edgeThreshold) ? Math.pow((normalizedY - (1 - edgeThreshold)) / edgeThreshold, 2) : 0;
+      const proximityLeft = normalizedX < edgeThreshold ? Math.pow(1 - normalizedX / edgeThreshold, 2) : 0;
+      const proximityRight = normalizedX > (1 - edgeThreshold) ? Math.pow((normalizedX - (1 - edgeThreshold)) / edgeThreshold, 2) : 0;
+
+      const MAX_REFLECT_INTENSITY = 0.5;
+      const reflectTop = Math.min(MAX_REFLECT_INTENSITY, glowIntensityAtTop * REFLECTION_COEFFICIENT * proximityTop);
+      const reflectBottom = Math.min(MAX_REFLECT_INTENSITY, glowIntensityAtBottom * REFLECTION_COEFFICIENT * proximityBottom);
+      const reflectLeft = Math.min(MAX_REFLECT_INTENSITY, glowIntensityAtLeft * REFLECTION_COEFFICIENT * proximityLeft);
+      const reflectRight = Math.min(MAX_REFLECT_INTENSITY, glowIntensityAtRight * REFLECTION_COEFFICIENT * proximityRight);
+
+      document.body.style.setProperty('--reflect-top', reflectTop.toFixed(3));
+      document.body.style.setProperty('--reflect-bottom', reflectBottom.toFixed(3));
+      document.body.style.setProperty('--reflect-left', reflectLeft.toFixed(3));
+      document.body.style.setProperty('--reflect-right', reflectRight.toFixed(3));
+
+      const glowHWidthTop = 6.75 + reflectTop * 11.25;
+      const glowVHeightTop = 18 + reflectTop * 54;
+      const glowHWidthBottom = 6.75 + reflectBottom * 11.25;
+      const glowVHeightBottom = 18 + reflectBottom * 54;
+      const glowHWidthLeft = 18 + reflectLeft * 54;
+      const glowVHeightLeft = 6.75 + reflectLeft * 11.25;
+      const glowHWidthRight = 18 + reflectRight * 54;
+      const glowVHeightRight = 6.75 + reflectRight * 11.25;
+
+      document.body.style.setProperty('--glow-h-width-top', glowHWidthTop + '%');
+      document.body.style.setProperty('--glow-v-height-top', glowVHeightTop + 'px');
+      document.body.style.setProperty('--glow-h-width-bottom', glowHWidthBottom + '%');
+      document.body.style.setProperty('--glow-v-height-bottom', glowVHeightBottom + 'px');
+      document.body.style.setProperty('--glow-h-width-left', glowHWidthLeft + 'px');
+      document.body.style.setProperty('--glow-v-height-left', glowVHeightLeft + '%');
+      document.body.style.setProperty('--glow-h-width-right', glowHWidthRight + 'px');
+      document.body.style.setProperty('--glow-v-height-right', glowVHeightRight + '%');
+
+      this.updateElementsEdgeGlow(x, y);
+    },
+
+    initializeGlowState() {
+      const initialPosition = this.getRandomWanderTarget();
+      const wanderTarget = this.getRandomWanderTarget();
+      this.currentGlowX = initialPosition.x;
+      this.currentGlowY = initialPosition.y;
+      this.targetGlowX = wanderTarget.x;
+      this.targetGlowY = wanderTarget.y;
+      this.updateGlowPosition(initialPosition.x * window.innerWidth, initialPosition.y * window.innerHeight);
+    },
+
+    moveTowardsTarget(currentX, currentY, targetX, targetY, deltaTime, acceleration) {
+      const dx = targetX - currentX;
+      const dy = targetY - currentY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+
+      if (distance < this.WANDER_REACHED_THRESHOLD) {
+        this.currentSpeedX = 0;
+        this.currentSpeedY = 0;
+        return { x: targetX, y: targetY, reached: true };
+      }
+
+      const targetSpeedX = (dx / distance) * this.MAX_SPEED;
+      const targetSpeedY = (dy / distance) * this.MAX_SPEED;
+
+      this.currentSpeedX += (targetSpeedX - this.currentSpeedX) * acceleration;
+      this.currentSpeedY += (targetSpeedY - this.currentSpeedY) * acceleration;
+
+      const moveX = this.currentSpeedX * deltaTime;
+      const moveY = this.currentSpeedY * deltaTime;
+      const newX = Math.max(0, Math.min(1, currentX + moveX));
+      const newY = Math.max(0, Math.min(1, currentY + moveY));
+
+      const newDx = targetX - newX;
+      const newDy = targetY - newY;
+      const newDistance = Math.sqrt(newDx * newDx + newDy * newDy);
+
+      if (newDistance < this.WANDER_REACHED_THRESHOLD) {
+        this.currentSpeedX = 0;
+        this.currentSpeedY = 0;
+        return { x: targetX, y: targetY, reached: true };
+      }
+
+      return { x: newX, y: newY, reached: false };
+    },
+
+    enableAutoGlow() {
+      if (this.isAutoGlow) return;
+      this.isAutoGlow = true;
+      const newTarget = this.getRandomWanderTarget();
+      this.targetGlowX = newTarget.x;
+      this.targetGlowY = newTarget.y;
+    },
+
+    setMouseTarget(x, y) {
+      this.isAutoGlow = false;
+      this.targetGlowX = x / window.innerWidth;
+      this.targetGlowY = y / window.innerHeight;
+    },
+
+    handleMouseMove(e) {
+      if (document.hidden) return;
+
+      const isInBounds = e.clientX >= 0 && e.clientX <= window.innerWidth &&
+                         e.clientY >= 0 && e.clientY <= window.innerHeight;
+
+      if (isInBounds) {
+        glowState.latestMouseX = e.clientX;
+        glowState.latestMouseY = e.clientY;
+
+        if (glowState.isAutoGlow) {
+          glowState.isAutoGlow = false;
+          glowState.lastMouseSampleTime = Date.now();
+          glowState.setMouseTarget(glowState.latestMouseX, glowState.latestMouseY);
+        }
+
+        clearTimeout(glowState.mouseIdleTimer);
+        glowState.mouseIdleTimer = setTimeout(() => {
+          glowState.enableAutoGlow();
+        }, 6000);
+      } else {
+        clearTimeout(glowState.mouseIdleTimer);
+        glowState.enableAutoGlow();
+      }
+    },
+
+    handleVisibilityChange() {
+      if (document.hidden) {
+        clearTimeout(glowState.mouseIdleTimer);
+        glowState.enableAutoGlow();
+
+        glowState.visibilityTimer = setTimeout(() => {
+          glowState.isRenderingStopped = true;
+          cancelAnimationFrame(glowState.glowAnimationFrame);
+
+          document.body.style.setProperty('--breathe-opacity', '0');
+          document.body.style.setProperty('--reflect-top', '0');
+          document.body.style.setProperty('--reflect-bottom', '0');
+          document.body.style.setProperty('--reflect-left', '0');
+          document.body.style.setProperty('--reflect-right', '0');
+        }, 10000);
+      } else {
+        clearTimeout(glowState.visibilityTimer);
+
+        if (glowState.isRenderingStopped) {
+          glowState.isRenderingStopped = false;
+          glowState.fadeInPhase = 0;
+          glowState.lastFrameTime = Date.now();
+          glowState.animateGlow();
+        }
+      }
+    },
+
+    animateGlow() {
+      if (glowState.isRenderingStopped) return;
+
+      const now = Date.now();
+      const rawDeltaTime = (now - glowState.lastFrameTime) / 1000;
+      const deltaTime = Math.min(0.1, rawDeltaTime);
+      glowState.lastFrameTime = now;
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+
+      if (glowState.fadeInPhase < 1) {
+        glowState.fadeInPhase += deltaTime / glowState.FADE_IN_DURATION;
+        glowState.fadeInPhase = Math.min(glowState.fadeInPhase, 1);
+      }
+
+      glowState.colorTransitionPhase += deltaTime / glowState.colorTransitionDuration;
+      if (glowState.colorTransitionPhase >= 1) {
+        glowState.currentColorIndex = glowState.targetColorIndex;
+        glowState.targetColorIndex = glowState.getNextColorIndex(glowState.currentColorIndex);
+        glowState.colorTransitionPhase = 0;
+        glowState.colorTransitionDuration = 10 + Math.random() * 35;
+      }
+
+      glowState.applyGlowColor();
+
+      const breatheSmoothing = deltaTime > 0 ? 1 - Math.exp(-glowState.BREATHE_SMOOTHING_SPEED * deltaTime) : 0;
+      if (breatheSmoothing > 0) {
+        glowState.breatheMinOpacity += (glowState.targetBreatheMinOpacity - glowState.breatheMinOpacity) * breatheSmoothing;
+        glowState.breatheMaxOpacity += (glowState.targetBreatheMaxOpacity - glowState.breatheMaxOpacity) * breatheSmoothing;
+        glowState.breatheCycleDuration += (glowState.targetBreatheCycleDuration - glowState.breatheCycleDuration) * breatheSmoothing;
+      }
+
+      const safeCycleDuration = Math.max(0.5, glowState.breatheCycleDuration);
+      glowState.breathePhase += deltaTime / safeCycleDuration;
+      if (glowState.breathePhase >= 1) {
+        glowState.breathePhase %= 1;
+        glowState.targetBreatheMinOpacity = 0.5 + Math.random() * 0.2;
+        glowState.targetBreatheMaxOpacity = 1.0 + Math.random() * 0.2;
+        glowState.targetBreatheCycleDuration = 2 + Math.random() * 10;
+      }
+
+      glowState.syncBreatheOpacity();
+
+      if (glowState.isAutoGlow) {
+        if (glowState.isResting) {
+          if (now - glowState.restStartTime >= glowState.currentRestDuration) {
+            glowState.isResting = false;
+            const newTarget = glowState.getRandomWanderTarget();
+            glowState.targetGlowX = newTarget.x;
+            glowState.targetGlowY = newTarget.y;
+            glowState.currentSpeedX = 0;
+            glowState.currentSpeedY = 0;
+          }
+        } else {
+          const result = glowState.moveTowardsTarget(
+            glowState.currentGlowX, glowState.currentGlowY,
+            glowState.targetGlowX, glowState.targetGlowY,
+            deltaTime, glowState.WANDER_ACCELERATION
+          );
+          if (result.reached) {
+            glowState.isResting = true;
+            glowState.restStartTime = now;
+            glowState.currentRestDuration = Math.random() * 8000;
+          }
+          glowState.updateGlowPosition(result.x * w, result.y * h);
+        }
+      } else {
+        if (now - glowState.lastMouseSampleTime >= glowState.MOUSE_SAMPLE_INTERVAL) {
+          glowState.setMouseTarget(glowState.latestMouseX, glowState.latestMouseY);
+          glowState.lastMouseSampleTime = now;
+        }
+        const result = glowState.moveTowardsTarget(
+          glowState.currentGlowX, glowState.currentGlowY,
+          glowState.targetGlowX, glowState.targetGlowY,
+          deltaTime, glowState.MOUSE_ACCELERATION
+        );
+        glowState.updateGlowPosition(result.x * w, result.y * h);
+      }
+
+      glowState.glowAnimationFrame = requestAnimationFrame(() => glowState.animateGlow());
     }
-
-    // Color
-    colorPhase += dt * 0.05;
-    if (colorPhase >= 1) {
-      colorPhase = 0;
-      curColorIdx = nextColorIdx;
-      nextColorIdx = (curColorIdx + 1) % colorTable.length;
-    }
-    const c1 = colorTable[curColorIdx], c2 = colorTable[nextColorIdx];
-    const r = Math.round(c1.r + (c2.r - c1.r) * colorPhase);
-    const g = Math.round(c1.g + (c2.g - c1.g) * colorPhase);
-    const b = Math.round(c1.b + (c2.b - c1.b) * colorPhase);
-
-    // Breathe
-    breathePhase += dt * 0.2;
-    const opacity = 0.7 + 0.3 * Math.sin(breathePhase * Math.PI * 2);
-
-    // Reflect calculations
-    const radius = 0.55, coeff = 0.6, threshold = 0.3;
-    const pTop = glowY < threshold ? Math.pow(1 - glowY / threshold, 2) : 0;
-    const pBottom = glowY > (1 - threshold) ? Math.pow((glowY - (1 - threshold)) / threshold, 2) : 0;
-    const pLeft = glowX < threshold ? Math.pow(1 - glowX / threshold, 2) : 0;
-    const pRight = glowX > (1 - threshold) ? Math.pow((glowX - (1 - threshold)) / threshold, 2) : 0;
-
-    const refT = Math.max(0, 1 - glowY / radius) * coeff * pTop;
-    const refB = Math.max(0, 1 - (1 - glowY) / radius) * coeff * pBottom;
-    const refL = Math.max(0, 1 - glowX / radius) * coeff * pLeft;
-    const refR = Math.max(0, 1 - (1 - glowX) / radius) * coeff * pRight;
-
-    const s = document.body.style;
-    s.setProperty('--glow-x', (glowX * 100).toFixed(1) + '%');
-    s.setProperty('--glow-y', (glowY * 100).toFixed(1) + '%');
-    s.setProperty('--glow-r', r); s.setProperty('--glow-g', g); s.setProperty('--glow-b', b);
-    s.setProperty('--breathe-opacity', opacity.toFixed(3));
-    s.setProperty('--reflect-top', refT.toFixed(3));
-    s.setProperty('--reflect-bottom', refB.toFixed(3));
-    s.setProperty('--reflect-left', refL.toFixed(3));
-    s.setProperty('--reflect-right', refR.toFixed(3));
-    s.setProperty('--glow-h-width-top', (6.75 + refT * 11.25) + '%');
-    s.setProperty('--glow-v-height-top', (18 + refT * 54) + 'px');
-    s.setProperty('--glow-h-width-bottom', (6.75 + refB * 11.25) + '%');
-    s.setProperty('--glow-v-height-bottom', (18 + refB * 54) + 'px');
-    s.setProperty('--glow-h-width-left', (18 + refL * 54) + 'px');
-    s.setProperty('--glow-v-height-left', (6.75 + refL * 11.25) + '%');
-    s.setProperty('--glow-h-width-right', (18 + refR * 54) + 'px');
-    s.setProperty('--glow-v-height-right', (6.75 + refR * 11.25) + '%');
-
-    requestAnimationFrame(updateGlow);
   };
 
-  requestAnimationFrame(updateGlow);
-  document.addEventListener('mousemove', (e) => {
-    targetX = e.clientX / window.innerWidth;
-    targetY = e.clientY / window.innerHeight;
-  });
+  // Initialize glow effect
+  glowState.breatheCycleDuration = glowState.getRandomBreatheDuration();
+  glowState.breatheMinOpacity = glowState.getRandomBreatheMin();
+  glowState.breatheMaxOpacity = glowState.getRandomBreatheMax();
+  glowState.targetBreatheCycleDuration = glowState.breatheCycleDuration;
+  glowState.targetBreatheMinOpacity = glowState.breatheMinOpacity;
+  glowState.targetBreatheMaxOpacity = glowState.breatheMaxOpacity;
+  glowState.colorTransitionDuration = glowState.getRandomColorTransitionDuration();
+  glowState.currentColorIndex = glowState.getRandomColorIndex();
+  glowState.targetColorIndex = glowState.getNextColorIndex(glowState.currentColorIndex);
+  glowState.initializeGlowState();
+  glowState.applyGlowColor();
+  glowState.syncBreatheOpacity();
+  glowState.lastFrameTime = Date.now();
+  glowState.glowAnimationFrame = requestAnimationFrame(() => glowState.animateGlow());
+
+  document.addEventListener('mousemove', (e) => glowState.handleMouseMove(e));
+  document.addEventListener('visibilitychange', () => glowState.handleVisibilityChange());
 
   return {
     logEl: document.getElementById("log"),
