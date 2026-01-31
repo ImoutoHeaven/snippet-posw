@@ -87,6 +87,7 @@ const pickConfigWithId = (hostname, path) => {
 };
 
 const getConfigById = (cfgId) => {
+  if (cfgId === -1) return DEFAULTS;
   if (!Number.isInteger(cfgId) || cfgId < 0 || cfgId >= COMPILED_CONFIG.length) {
     return null;
   }
@@ -2291,9 +2292,8 @@ export default {
     }
 
     const selected = pickConfigWithId(hostname, requestPath);
-    const config = selected ? { ...DEFAULTS, ...selected.config } : null;
-    if (!config) return S(500);
-    const cfgId = selected.cfgId;
+    const cfgId = selected ? selected.cfgId : -1;
+    const config = selected ? { ...DEFAULTS, ...selected.config } : DEFAULTS;
 
     const needPow = config.powcheck === true;
     const needTurn = config.turncheck === true;
