@@ -11,16 +11,18 @@ This project provides a self-contained L7 front gate that:
 
 ## Files
 
-- `pow.js`: source snippet (PoW API + gate).
+- `pow-config.js`: front snippet (match config + derived binding values + signed inner header).
+- `pow.js`: core gate snippet (PoW API + gate), requires the signed inner header.
 - `glue.js`: browser-side UI + orchestration (loaded by the challenge page).
 - `esm/esm.js`: browser-side PoW solver (`computePoswCommit`).
 - `template.html`: minimal challenge page template injected into the build.
-- `build.mjs`: build script (esbuild + HTML minify) → `dist/pow_snippet.js`.
-- `dist/pow_snippet.js`: ready-to-paste Cloudflare Snippet output.
+- `build.mjs`: build script (esbuild + HTML minify) → `dist/pow_config_snippet.js` + `dist/pow_snippet.js`.
+- `dist/pow_config_snippet.js`: config snippet output.
+- `dist/pow_snippet.js`: gate snippet output.
 
 ## Configuration
 
-Edit `CONFIG` in `pow.js` to match your host/path patterns and enable **PoW** and/or **Turnstile**:
+Edit `CONFIG` in `pow-config.js` to match your host/path patterns and enable **PoW** and/or **Turnstile**:
 
 ```js
 const CONFIG = [
@@ -31,10 +33,12 @@ const CONFIG = [
 Notes:
 
 - `POW_TOKEN` is required when `powcheck` or `turncheck` is `true`.
+- Set `CONFIG_SECRET` to the same non-placeholder value in both `pow-config.js` and `pow.js`.
 - When `turncheck: true`, you must also set:
   - `TURNSTILE_SITEKEY`
   - `TURNSTILE_SECRET`
 - `pattern` matching is first-match-wins; put more specific rules first.
+- `pow.js` keeps a minimal `DEFAULTS` set for immutable runtime constants and safe fallbacks; the inner header only carries resolved overrides + derived bindings to keep header size small.
 
 ## Config Reference
 
@@ -319,13 +323,14 @@ npm install
 npm run build
 ```
 
-Output: `dist/pow_snippet.js` (checks the Cloudflare Snippet 32KB limit).
+Output: `dist/pow_config_snippet.js` + `dist/pow_snippet.js` (each checks the Cloudflare Snippet 32KB limit).
 
 ## Deploy
 
-1. Build and copy `dist/pow_snippet.js` into Cloudflare **Snippets** (or deploy as a Worker).
-2. Ensure it runs **before** any downstream auth/business snippets (if you use multiple snippets).
-3. Keep `/__pow/*` reachable from browsers during the challenge flow.
+1. Set `CONFIG_SECRET` in `pow-config.js` and `pow.js` (must match, not `replace-me`).
+2. Build and copy `dist/pow_config_snippet.js` and `dist/pow_snippet.js` into Cloudflare **Snippets**.
+3. Ensure `pow-config` runs **before** `pow.js`, and both run before any downstream auth/business snippets.
+4. Keep `/__pow/*` reachable from browsers during the challenge flow.
 
 ## Managed Challenge (optional)
 
