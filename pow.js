@@ -1,69 +1,13 @@
 // Cloudflare Snippet: stateless PoW (generic L7 WAF)
-// Set POW_TOKEN in CONFIG to your PoW secret.
-
-const DEFAULTS = {
-  powcheck: false,
-  turncheck: false,
-  bindPathMode: "none",
-  bindPathQueryName: "path",
-  bindPathHeaderName: "",
-  stripBindPathHeader: false,
-  POW_VERSION: 3,
-  POW_API_PREFIX: "/__pow",
-  POW_DIFFICULTY_BASE: 8192,
-  POW_DIFFICULTY_COEFF: 1.0,
-  POW_MIN_STEPS: 512,
-  POW_MAX_STEPS: 8192,
-  POW_HASHCASH_BITS: 3,
-  POW_SEGMENT_LEN: "48-64",
-  POW_SAMPLE_K: 15,
-  POW_SPINE_K: 2,
-  POW_CHAL_ROUNDS: 12,
-  POW_OPEN_BATCH: 15,
-  POW_FORCE_EDGE_1: true,
-  POW_FORCE_EDGE_LAST: true,
-  POW_COMMIT_TTL_SEC: 120,
-  POW_TICKET_TTL_SEC: 600,
-  PROOF_TTL_SEC: 600,
-  PROOF_RENEW_ENABLE: false,
-  PROOF_RENEW_MAX: 2,
-  PROOF_RENEW_WINDOW_SEC: 90,
-  PROOF_RENEW_MIN_SEC: 30,
-  ATOMIC_CONSUME: false,
-  ATOMIC_TURN_QUERY: "__ts",
-  ATOMIC_TICKET_QUERY: "__tt",
-  ATOMIC_CONSUME_QUERY: "__ct",
-  ATOMIC_TURN_HEADER: "x-turnstile",
-  ATOMIC_TICKET_HEADER: "x-ticket",
-  ATOMIC_CONSUME_HEADER: "x-consume",
-  ATOMIC_COOKIE_NAME: "__Secure-pow_a",
-  STRIP_ATOMIC_QUERY: true,
-  STRIP_ATOMIC_HEADERS: true,
-  INNER_AUTH_QUERY_NAME: "",
-  INNER_AUTH_QUERY_VALUE: "",
-  INNER_AUTH_HEADER_NAME: "",
-  INNER_AUTH_HEADER_VALUE: "",
-  stripInnerAuthQuery: false,
-  stripInnerAuthHeader: false,
-  POW_BIND_PATH: true,
-  POW_BIND_IPRANGE: true,
-  POW_BIND_COUNTRY: false,
-  POW_BIND_ASN: false,
-  POW_BIND_TLS: true,
-  IPV4_PREFIX: 32,
-  IPV6_PREFIX: 64,
-  POW_COMMIT_COOKIE: "__Host-pow_commit",
-  POW_ESM_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@412f7fcc71c319b62a614e4252280f2bb3d7302b/esm/esm.js",
-  POW_GLUE_URL:
-    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@412f7fcc71c319b62a614e4252280f2bb3d7302b/glue.js",
-};
-
-const POW_API_PREFIX = DEFAULTS.POW_API_PREFIX;
+// Set POW_TOKEN in config to your PoW secret.
 const PROOF_COOKIE = "__Host-proof";
 const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const INNER_HEADER = "X-Pow-Inner";
 const INNER_MAC = "X-Pow-Inner-Mac";
+const INNER_COUNT_HEADER = `${INNER_HEADER}-Count`;
+const INNER_CHUNK_PREFIX = `${INNER_HEADER}-`;
+const INNER_CHUNK_MAX = 64;
+const INNER_PAYLOAD_MAX_LEN = 128 * 1024;
 const CONFIG_SECRET = "replace-me";
 const isPlaceholderConfigSecret = (value) =>
   typeof value !== "string" || !value.trim() || value === "replace-me";
@@ -114,8 +58,24 @@ const base64UrlDecodeToBytes = (b64u) => {
 
 const readInnerPayload = async (request) => {
   if (isPlaceholderConfigSecret(CONFIG_SECRET)) return null;
-  const payload = request.headers.get(INNER_HEADER) || "";
+  let payload = request.headers.get(INNER_HEADER) || "";
   const mac = request.headers.get(INNER_MAC) || "";
+  if (!payload) {
+    const countRaw = request.headers.get(INNER_COUNT_HEADER) || "";
+    if (!/^[0-9]+$/.test(countRaw)) return null;
+    const count = Number(countRaw);
+    if (!Number.isFinite(count) || count <= 0 || count > INNER_CHUNK_MAX) return null;
+    let total = 0;
+    const parts = [];
+    for (let i = 0; i < count; i += 1) {
+      const part = request.headers.get(`${INNER_CHUNK_PREFIX}${i}`) || "";
+      if (!part) return null;
+      total += part.length;
+      if (total > INNER_PAYLOAD_MAX_LEN) return null;
+      parts.push(part);
+    }
+    payload = parts.join("");
+  }
   if (!payload || !mac) return null;
   const expected = await hmacSha256Base64UrlNoPad(CONFIG_SECRET, payload);
   if (!timingSafeEqual(expected, mac)) return null;
@@ -138,8 +98,12 @@ const readInnerPayload = async (request) => {
 
 const stripInnerHeaders = (request) => {
   const headers = new Headers(request.headers);
-  headers.delete(INNER_HEADER);
-  headers.delete(INNER_MAC);
+  const keys = Array.from(headers.keys());
+  for (const key of keys) {
+    if (key.toLowerCase().startsWith("x-pow-inner")) {
+      headers.delete(key);
+    }
+  }
   return new Request(request, { headers });
 };
 
@@ -167,10 +131,6 @@ const isBase64Url = (value, minLen, maxLen) => {
 
 
 const utf8ToBytes = (value) => encoder.encode(String(value ?? ""));
-const normalizeNumber = (value, fallback) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : fallback;
-};
 
 const normalizePath = (pathname) => {
   if (typeof pathname !== "string") return null;
@@ -219,13 +179,12 @@ const resolveBindPathForPow = (request, url, requestPath, config) => {
   if (config.POW_BIND_PATH === false) {
     return { ok: true, canonicalPath: requestPath, forwardRequest: request };
   }
-  const mode = typeof config.bindPathMode === "string" ? config.bindPathMode : "none";
+  const mode = config.bindPathMode;
   if (!mode || mode === "none") {
     return { ok: true, canonicalPath: requestPath, forwardRequest: request };
   }
   if (mode === "query") {
-    const name =
-      typeof config.bindPathQueryName === "string" ? config.bindPathQueryName.trim() : "";
+    const name = config.bindPathQueryName.trim();
     if (!name) return { ok: false, code: "misconfigured" };
     const raw = url.searchParams.get(name);
     if (!raw) return { ok: false, code: "missing" };
@@ -234,8 +193,7 @@ const resolveBindPathForPow = (request, url, requestPath, config) => {
     return { ok: true, canonicalPath: canonical, forwardRequest: request };
   }
   if (mode === "header") {
-    const name =
-      typeof config.bindPathHeaderName === "string" ? config.bindPathHeaderName.trim() : "";
+    const name = config.bindPathHeaderName.trim();
     if (!name) return { ok: false, code: "misconfigured" };
     const raw = request.headers.get(name);
     if (!raw) return { ok: false, code: "missing" };
@@ -382,161 +340,12 @@ const getClientIP = (request) =>
   request.headers.get("cf-connecting-ip") ||
   "0.0.0.0";
 
-const isIpv4 = (ip) => /^\d{1,3}(\.\d{1,3}){3}$/.test(ip);
-const isIpv6 = (ip) => ip.includes(":");
-
-const parseIpv4 = (ip) => {
-  if (!isIpv4(ip)) return null;
-  const parts = ip.split(".").map((v) => Number.parseInt(v, 10));
-  if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-    return null;
-  }
-  return parts;
-};
-
-const formatIpv4 = (bytes) => bytes.join(".");
-
-const ipv4Cidr = (ip, prefix) => {
-  const bytes = parseIpv4(ip);
-  if (!bytes) return null;
-  const p = Math.min(32, Math.max(0, Number(prefix)));
-  const ipInt =
-    (bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3];
-  const mask = p === 0 ? 0 : (~0 << (32 - p)) >>> 0;
-  const net = ipInt & mask;
-  const netBytes = [
-    (net >>> 24) & 0xff,
-    (net >>> 16) & 0xff,
-    (net >>> 8) & 0xff,
-    net & 0xff,
-  ];
-  return `${formatIpv4(netBytes)}/${p}`;
-};
-
-const parseIpv6Hextets = (part) => {
-  if (!part) return [];
-  const tokens = part.split(":");
-  const out = [];
-  for (const token of tokens) {
-    if (!token) continue;
-    if (token.includes(".")) {
-      const v4 = parseIpv4(token);
-      if (!v4) return null;
-      const hi = (v4[0] << 8) | v4[1];
-      const lo = (v4[2] << 8) | v4[3];
-      out.push(hi, lo);
-      continue;
-    }
-    const value = Number.parseInt(token, 16);
-    if (!Number.isFinite(value) || value < 0 || value > 0xffff) return null;
-    out.push(value);
-  }
-  return out;
-};
-
-const parseIpv6 = (ip) => {
-  if (!ip || typeof ip !== "string") return null;
-  const raw = ip.split("%")[0];
-  if (!raw) return null;
-  if (raw === "::") return new Uint8Array(16);
-  const parts = raw.split("::");
-  if (parts.length > 2) return null;
-  const head = parseIpv6Hextets(parts[0]);
-  if (head === null) return null;
-  const tail = parts.length === 2 ? parseIpv6Hextets(parts[1]) : [];
-  if (tail === null) return null;
-  const total = head.length + tail.length;
-  if (total > 8) return null;
-  const zeros = parts.length === 2 ? 8 - total : 0;
-  if (parts.length === 1 && total !== 8) return null;
-  const full = head.concat(Array(zeros).fill(0)).concat(tail);
-  if (full.length !== 8) return null;
-  const bytes = new Uint8Array(16);
-  for (let i = 0; i < 8; i++) {
-    bytes[i * 2] = (full[i] >>> 8) & 0xff;
-    bytes[i * 2 + 1] = full[i] & 0xff;
-  }
-  return bytes;
-};
-
-const formatIpv6 = (bytes) => {
-  const parts = [];
-  for (let i = 0; i < 16; i += 2) {
-    const value = (bytes[i] << 8) | bytes[i + 1];
-    parts.push(value.toString(16).padStart(4, "0"));
-  }
-  return parts.join(":");
-};
-
-const ipv6Cidr = (ip, prefix) => {
-  const bytes = parseIpv6(ip);
-  if (!bytes) return null;
-  const p = Math.min(128, Math.max(0, Number(prefix)));
-  const fullBytes = Math.floor(p / 8);
-  const rem = p % 8;
-  const out = new Uint8Array(bytes);
-  for (let i = 0; i < 16; i++) {
-    if (i < fullBytes) continue;
-    if (i === fullBytes && rem > 0) {
-      const mask = 0xff << (8 - rem);
-      out[i] = out[i] & mask;
-    } else {
-      out[i] = 0;
-    }
-  }
-  return `${formatIpv6(out)}/${p}`;
-};
-
-const computeIpScope = (ip, config) => {
-  const v4Prefix = normalizeNumber(config.IPV4_PREFIX, DEFAULTS.IPV4_PREFIX);
-  const v6Prefix = normalizeNumber(config.IPV6_PREFIX, DEFAULTS.IPV6_PREFIX);
-  if (isIpv4(ip)) {
-    return ipv4Cidr(ip, v4Prefix) || "unknown";
-  }
-  if (isIpv6(ip)) {
-    return ipv6Cidr(ip, v6Prefix) || "unknown";
-  }
-  return "unknown";
-};
-
-const getRequestCf = (request) => {
-  const cf = request && request.cf;
-  return cf && typeof cf === "object" ? cf : null;
-};
-
-const normalizeCfValue = (value) => {
-  if (value === null || value === undefined) return "";
-  if (typeof value === "string") return value.trim();
-  if (typeof value === "number" && Number.isFinite(value)) return String(value);
-  return String(value);
-};
-
-const normalizeCountry = (value) => {
-  const raw = normalizeCfValue(value);
-  return raw ? raw.toUpperCase() : "unknown";
-};
-
-const normalizeAsn = (value) => {
-  const num = Number(value);
-  return Number.isFinite(num) ? String(Math.trunc(num)) : "unknown";
-};
-
-const normalizeTlsFingerprint = (value) => {
-  if (typeof value !== "string") return "";
-  return value.trim();
-};
 
 const resolveBypassRequest = (request, url, config) => {
-  const queryName =
-    typeof config.INNER_AUTH_QUERY_NAME === "string" ? config.INNER_AUTH_QUERY_NAME.trim() : "";
-  const queryValue =
-    typeof config.INNER_AUTH_QUERY_VALUE === "string" ? config.INNER_AUTH_QUERY_VALUE : "";
-  const headerName =
-    typeof config.INNER_AUTH_HEADER_NAME === "string"
-      ? config.INNER_AUTH_HEADER_NAME.trim()
-      : "";
-  const headerValue =
-    typeof config.INNER_AUTH_HEADER_VALUE === "string" ? config.INNER_AUTH_HEADER_VALUE : "";
+  const queryName = config.INNER_AUTH_QUERY_NAME.trim();
+  const queryValue = config.INNER_AUTH_QUERY_VALUE;
+  const headerName = config.INNER_AUTH_HEADER_NAME.trim();
+  const headerValue = config.INNER_AUTH_HEADER_VALUE;
   const queryConfigured = Boolean(queryName && queryValue);
   const headerConfigured = Boolean(headerName && headerValue);
   const queryMatch = queryConfigured
@@ -585,31 +394,13 @@ const resolveBypassRequest = (request, url, config) => {
 };
 
 const extractAtomicAuth = (request, url, config) => {
-  const qTurn =
-    (typeof config.ATOMIC_TURN_QUERY === "string" && config.ATOMIC_TURN_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_TURN_QUERY;
-  const qTicket =
-    (typeof config.ATOMIC_TICKET_QUERY === "string" &&
-      config.ATOMIC_TICKET_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_TICKET_QUERY;
-  const qConsume =
-    (typeof config.ATOMIC_CONSUME_QUERY === "string" &&
-      config.ATOMIC_CONSUME_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_CONSUME_QUERY;
-  const hTurn =
-    (typeof config.ATOMIC_TURN_HEADER === "string" && config.ATOMIC_TURN_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_TURN_HEADER;
-  const hTicket =
-    (typeof config.ATOMIC_TICKET_HEADER === "string" &&
-      config.ATOMIC_TICKET_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_TICKET_HEADER;
-  const hConsume =
-    (typeof config.ATOMIC_CONSUME_HEADER === "string" &&
-      config.ATOMIC_CONSUME_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_CONSUME_HEADER;
-  const cookieName =
-    (typeof config.ATOMIC_COOKIE_NAME === "string" && config.ATOMIC_COOKIE_NAME.trim()) ||
-    DEFAULTS.ATOMIC_COOKIE_NAME;
+  const qTurn = config.ATOMIC_TURN_QUERY.trim();
+  const qTicket = config.ATOMIC_TICKET_QUERY.trim();
+  const qConsume = config.ATOMIC_CONSUME_QUERY.trim();
+  const hTurn = config.ATOMIC_TURN_HEADER.trim();
+  const hTicket = config.ATOMIC_TICKET_HEADER.trim();
+  const hConsume = config.ATOMIC_CONSUME_HEADER.trim();
+  const cookieName = config.ATOMIC_COOKIE_NAME.trim();
 
   let turnToken = "";
   let ticketB64 = "";
@@ -686,21 +477,11 @@ const extractAtomicAuth = (request, url, config) => {
   return { turnToken, ticketB64, consumeToken, forwardRequest, fromCookie, cookieName };
 };
 
-const buildTlsFingerprintHash = async (request) => {
-  const cf = getRequestCf(request);
-  if (!cf) return "";
-  const extensions = normalizeTlsFingerprint(cf.tlsClientExtensionsSha1);
-  const ciphers = normalizeTlsFingerprint(cf.tlsClientCiphersSha1);
-  if (!extensions || !ciphers) return "";
-  const digest = await sha256Bytes(`${extensions}|${ciphers}`);
-  return base64UrlEncodeNoPad(digest);
-};
-
 const getPowSteps = (config) => {
-  const base = normalizeNumber(config.POW_DIFFICULTY_BASE, DEFAULTS.POW_DIFFICULTY_BASE);
-  const coeff = normalizeNumber(config.POW_DIFFICULTY_COEFF, DEFAULTS.POW_DIFFICULTY_COEFF);
-  const minSteps = normalizeNumber(config.POW_MIN_STEPS, DEFAULTS.POW_MIN_STEPS);
-  const maxSteps = normalizeNumber(config.POW_MAX_STEPS, DEFAULTS.POW_MAX_STEPS);
+  const base = config.POW_DIFFICULTY_BASE;
+  const coeff = config.POW_DIFFICULTY_COEFF;
+  const minSteps = config.POW_MIN_STEPS;
+  const maxSteps = config.POW_MAX_STEPS;
   const raw =
     Number.isFinite(base) && base > 0
       ? Number.isFinite(coeff) && coeff > 0
@@ -790,13 +571,16 @@ const clampInt = (value, lo, hi) => {
   return Math.max(lo, Math.min(hi, Math.floor(num)));
 };
 
-const parseSegmentLenSpec = (raw, defaultValue) => {
-  const fallback = clampInt(defaultValue, 1, 64);
+const parseSegmentLenSpec = (raw) => {
   if (raw === null || raw === undefined) {
-    return { mode: "fixed", fixed: fallback };
+    return null;
   }
   const isNumericString = typeof raw === "string" && /^\d+$/.test(raw.trim());
-  if (typeof raw === "number" || isNumericString) {
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    const fixed = clampInt(raw, 1, 64);
+    return { mode: "fixed", fixed };
+  }
+  if (isNumericString) {
     const fixed = clampInt(raw, 1, 64);
     return { mode: "fixed", fixed };
   }
@@ -810,7 +594,7 @@ const parseSegmentLenSpec = (raw, defaultValue) => {
       }
     }
   }
-  return { mode: "fixed", fixed: fallback };
+  return null;
 };
 
 const computeSegLensForIndices = (indices, segSpec, rngSeg) => {
@@ -823,32 +607,15 @@ const computeSegLensForIndices = (indices, segSpec, rngSeg) => {
 };
 
 const getBatchMax = (config) =>
-  Math.max(
-    1,
-    Math.min(
-      32,
-      Math.floor(normalizeNumber(config.POW_OPEN_BATCH, DEFAULTS.POW_OPEN_BATCH))
-    )
-  );
+  Math.max(1, Math.min(32, Math.floor(config.POW_OPEN_BATCH)));
 
 const buildPowSample = async (config, powSecret, ticket, commitMac, sid) => {
-  const rounds = Math.max(
-    1,
-    Math.floor(normalizeNumber(config.POW_CHAL_ROUNDS, DEFAULTS.POW_CHAL_ROUNDS))
-  );
-  const sampleK = Math.max(
-    0,
-    Math.floor(normalizeNumber(config.POW_SAMPLE_K, DEFAULTS.POW_SAMPLE_K))
-  );
-  const hashcashBits = Math.max(
-    0,
-    Math.floor(normalizeNumber(config.POW_HASHCASH_BITS, DEFAULTS.POW_HASHCASH_BITS))
-  );
-  const spineK = Math.max(
-    0,
-    Math.floor(normalizeNumber(config.POW_SPINE_K, DEFAULTS.POW_SPINE_K))
-  );
-  const segSpec = parseSegmentLenSpec(config.POW_SEGMENT_LEN, DEFAULTS.POW_SEGMENT_LEN);
+  const rounds = Math.max(1, Math.floor(config.POW_CHAL_ROUNDS));
+  const sampleK = Math.max(0, Math.floor(config.POW_SAMPLE_K));
+  const hashcashBits = Math.max(0, Math.floor(config.POW_HASHCASH_BITS));
+  const spineK = Math.max(0, Math.floor(config.POW_SPINE_K));
+  const segSpec = parseSegmentLenSpec(config.POW_SEGMENT_LEN);
+  if (!segSpec) return null;
   const seed16 = await derivePowSeedBytes16(powSecret, ticket.cfgId, commitMac, sid);
   const rng = makeXoshiro128ss(seed16);
   const indices = sampleIndicesDeterministicV2({
@@ -1179,20 +946,143 @@ const getPowBindingValues = async (request, canonicalPath, config, derived) => {
   return getPowBindingValuesWithPathHash(request, pathHash, config, derived);
 };
 
+const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+const isString = (value) => typeof value === "string";
+const isNonEmptyString = (value) => isString(value) && value.trim().length > 0;
+const isBoolean = (value) => typeof value === "boolean";
+const isSegmentLenValue = (value) =>
+  (typeof value === "string" && value.trim().length > 0) || isFiniteNumber(value);
+
+const validateConfig = (config) => {
+  const stringFields = [
+    "bindPathMode",
+    "bindPathQueryName",
+    "bindPathHeaderName",
+    "INNER_AUTH_QUERY_NAME",
+    "INNER_AUTH_QUERY_VALUE",
+    "INNER_AUTH_HEADER_NAME",
+    "INNER_AUTH_HEADER_VALUE",
+    "ATOMIC_TURN_QUERY",
+    "ATOMIC_TICKET_QUERY",
+    "ATOMIC_CONSUME_QUERY",
+    "ATOMIC_TURN_HEADER",
+    "ATOMIC_TICKET_HEADER",
+    "ATOMIC_CONSUME_HEADER",
+    "ATOMIC_COOKIE_NAME",
+    "POW_API_PREFIX",
+    "POW_COMMIT_COOKIE",
+    "POW_ESM_URL",
+    "POW_GLUE_URL",
+  ];
+  for (const key of stringFields) {
+    if (!isString(config[key])) return false;
+  }
+  const optionalStringFields = ["POW_TOKEN", "TURNSTILE_SITEKEY", "TURNSTILE_SECRET"];
+  for (const key of optionalStringFields) {
+    if (key in config && config[key] !== undefined && !isString(config[key])) {
+      return false;
+    }
+  }
+  const booleanFields = [
+    "powcheck",
+    "turncheck",
+    "stripBindPathHeader",
+    "POW_FORCE_EDGE_1",
+    "POW_FORCE_EDGE_LAST",
+    "PROOF_RENEW_ENABLE",
+    "ATOMIC_CONSUME",
+    "STRIP_ATOMIC_QUERY",
+    "STRIP_ATOMIC_HEADERS",
+    "stripInnerAuthQuery",
+    "stripInnerAuthHeader",
+    "POW_BIND_PATH",
+    "POW_BIND_IPRANGE",
+    "POW_BIND_COUNTRY",
+    "POW_BIND_ASN",
+    "POW_BIND_TLS",
+  ];
+  for (const key of booleanFields) {
+    if (!isBoolean(config[key])) return false;
+  }
+  const numberFields = [
+    "POW_VERSION",
+    "POW_DIFFICULTY_BASE",
+    "POW_DIFFICULTY_COEFF",
+    "POW_MIN_STEPS",
+    "POW_MAX_STEPS",
+    "POW_HASHCASH_BITS",
+    "POW_SAMPLE_K",
+    "POW_SPINE_K",
+    "POW_CHAL_ROUNDS",
+    "POW_OPEN_BATCH",
+    "POW_COMMIT_TTL_SEC",
+    "POW_TICKET_TTL_SEC",
+    "PROOF_TTL_SEC",
+    "PROOF_RENEW_MAX",
+    "PROOF_RENEW_WINDOW_SEC",
+    "PROOF_RENEW_MIN_SEC",
+  ];
+  for (const key of numberFields) {
+    if (!isFiniteNumber(config[key])) return false;
+  }
+  if (!isSegmentLenValue(config.POW_SEGMENT_LEN)) return false;
+  if (!parseSegmentLenSpec(config.POW_SEGMENT_LEN)) return false;
+  const modeValues = new Set(["none", "query", "header"]);
+  if (!modeValues.has(config.bindPathMode)) return false;
+  if (config.bindPathMode === "query" && !isNonEmptyString(config.bindPathQueryName)) {
+    return false;
+  }
+  if (config.bindPathMode === "header" && !isNonEmptyString(config.bindPathHeaderName)) {
+    return false;
+  }
+  if (!isNonEmptyString(config.POW_API_PREFIX)) return false;
+  if (!isNonEmptyString(config.POW_COMMIT_COOKIE)) return false;
+  if (!isNonEmptyString(config.ATOMIC_TURN_QUERY)) return false;
+  if (!isNonEmptyString(config.ATOMIC_TICKET_QUERY)) return false;
+  if (!isNonEmptyString(config.ATOMIC_CONSUME_QUERY)) return false;
+  if (!isNonEmptyString(config.ATOMIC_TURN_HEADER)) return false;
+  if (!isNonEmptyString(config.ATOMIC_TICKET_HEADER)) return false;
+  if (!isNonEmptyString(config.ATOMIC_CONSUME_HEADER)) return false;
+  if (!isNonEmptyString(config.ATOMIC_COOKIE_NAME)) return false;
+  if ((config.powcheck === true || config.turncheck === true) && !isNonEmptyString(config.POW_TOKEN)) {
+    return false;
+  }
+  if ((config.powcheck === true || config.turncheck === true) && !isNonEmptyString(config.POW_GLUE_URL)) {
+    return false;
+  }
+  if (config.powcheck === true && !isNonEmptyString(config.POW_ESM_URL)) {
+    return false;
+  }
+  if (config.turncheck === true) {
+    if (
+      !isNonEmptyString(config.TURNSTILE_SITEKEY) ||
+      !isNonEmptyString(config.TURNSTILE_SECRET)
+    ) {
+      return false;
+    }
+  }
+  return true;
+};
+
 const loadConfigFromInner = (inner) => {
   if (!inner || typeof inner !== "object") return null;
   const baseConfig = inner.c && typeof inner.c === "object" ? inner.c : null;
   if (!baseConfig) return null;
-  const config = { ...DEFAULTS, ...baseConfig };
-  return { config, powSecret: getPowSecret(config), derived: inner.d, cfgId: inner.id };
+  if (!validateConfig(baseConfig)) return null;
+  return {
+    config: baseConfig,
+    powSecret: getPowSecret(baseConfig),
+    derived: inner.d,
+    cfgId: inner.id,
+  };
 };
 
 const ticketMatchesInner = (ticket, cfgId) =>
   Boolean(ticket && Number.isInteger(cfgId) && ticket.cfgId === cfgId);
 
-const loadCommitFromRequest = (request) => {
+const loadCommitFromRequest = (request, config) => {
   const cookies = parseCookieHeader(request.headers.get("Cookie"));
-  const commitRaw = cookies.get(DEFAULTS.POW_COMMIT_COOKIE) || "";
+  const commitRaw = cookies.get(config.POW_COMMIT_COOKIE) || "";
   const commit = parsePowCommitCookie(commitRaw);
   if (!commit) return null;
   const ticket = parsePowTicket(commit.ticketB64);
@@ -1200,11 +1090,9 @@ const loadCommitFromRequest = (request) => {
   return { commit, ticket };
 };
 
-const getPowVersion = (config) =>
-  normalizeNumber(config.POW_VERSION, DEFAULTS.POW_VERSION);
+const getPowVersion = (config) => config.POW_VERSION;
 
-const getTurnSecret = (config) =>
-  typeof config.TURNSTILE_SECRET === "string" ? config.TURNSTILE_SECRET : "";
+const getTurnSecret = (config) => config.TURNSTILE_SECRET;
 
 const validateTicket = (ticket, config, nowSeconds) => {
   const powVersion = getPowVersion(config);
@@ -1324,7 +1212,7 @@ const verifyTurnstileForTicket = async (request, turnSecret, turnToken, ticket) 
 };
 
 const getProofTtl = (ticket, config, nowSeconds) => {
-  const proofTtl = normalizeNumber(config.PROOF_TTL_SEC, DEFAULTS.PROOF_TTL_SEC) || 0;
+  const proofTtl = config.PROOF_TTL_SEC || 0;
   const remaining = ticket.e - nowSeconds;
   const ttl = Math.max(1, Math.min(proofTtl, remaining));
   return Number.isFinite(ttl) && ttl > 0 ? ttl : 0;
@@ -1425,25 +1313,21 @@ const maybeRenewProof = async (
   const proof = meta.proof;
   const renewMax = Math.max(
     0,
-    Math.floor(normalizeNumber(config.PROOF_RENEW_MAX, DEFAULTS.PROOF_RENEW_MAX))
+    Math.floor(config.PROOF_RENEW_MAX)
   );
   if (!renewMax || proof.n >= renewMax) return response;
 
   const ttl = Math.max(
     1,
-    Math.floor(normalizeNumber(config.PROOF_TTL_SEC, DEFAULTS.PROOF_TTL_SEC))
+    Math.floor(config.PROOF_TTL_SEC)
   );
   const window = Math.max(
     0,
-    Math.floor(
-      normalizeNumber(config.PROOF_RENEW_WINDOW_SEC, DEFAULTS.PROOF_RENEW_WINDOW_SEC)
-    )
+    Math.floor(config.PROOF_RENEW_WINDOW_SEC)
   );
   const minSinceLast = Math.max(
     0,
-    Math.floor(
-      normalizeNumber(config.PROOF_RENEW_MIN_SEC, DEFAULTS.PROOF_RENEW_MIN_SEC)
-    )
+    Math.floor(config.PROOF_RENEW_MIN_SEC)
   );
   const curExp = meta.ticket && Number.isFinite(meta.ticket.e) ? meta.ticket.e : 0;
   if (!Number.isFinite(curExp) || curExp <= 0) return response;
@@ -1528,26 +1412,17 @@ const respondPowChallengeHtml = async (
   cfgId,
   requirements
 ) => {
-  const ticketTtl = normalizeNumber(
-    config.POW_TICKET_TTL_SEC,
-    DEFAULTS.POW_TICKET_TTL_SEC
-  ) || 0;
+  const ticketTtl = config.POW_TICKET_TTL_SEC || 0;
   const exp = nowSeconds + Math.max(1, ticketTtl);
   const needPow = requirements && requirements.needPow === true;
   const needTurn = requirements && requirements.needTurn === true;
   const steps = needPow ? getPowSteps(config) : 1;
   const glueSteps = needPow ? steps : 0;
-  const hashcashBits = needPow
-    ? Math.max(
-        0,
-        Math.floor(
-          normalizeNumber(config.POW_HASHCASH_BITS, DEFAULTS.POW_HASHCASH_BITS)
-        )
-      )
-    : 0;
+  const hashcashBits = needPow ? Math.max(0, Math.floor(config.POW_HASHCASH_BITS)) : 0;
   const segSpec = needPow
-    ? parseSegmentLenSpec(config.POW_SEGMENT_LEN, DEFAULTS.POW_SEGMENT_LEN)
+    ? parseSegmentLenSpec(config.POW_SEGMENT_LEN)
     : { mode: "fixed", fixed: 1 };
+  if (needPow && !segSpec) return S(500);
   const bindingValues = await getPowBindingValues(request, canonicalPath, config, derived);
   if (!bindingValues) return deny();
   const { pathHash, ipScope, country, asn, tlsFingerprint } = bindingValues;
@@ -1573,40 +1448,20 @@ const respondPowChallengeHtml = async (
   const ticketB64 = encodePowTicket(ticket);
   const bindingStringB64 = base64UrlEncodeNoPad(utf8ToBytes(bindingString));
   const reloadUrlB64 = base64UrlEncodeNoPad(utf8ToBytes(url.toString()));
-  const apiPrefixB64 = base64UrlEncodeNoPad(utf8ToBytes(POW_API_PREFIX));
-  const esmUrlB64 = needPow
-    ? base64UrlEncodeNoPad(utf8ToBytes(String(config.POW_ESM_URL)))
-    : "";
+  const apiPrefixB64 = base64UrlEncodeNoPad(utf8ToBytes(config.POW_API_PREFIX));
+  const esmUrlB64 = needPow ? base64UrlEncodeNoPad(utf8ToBytes(config.POW_ESM_URL)) : "";
   const turnSiteKeyB64 = needTurn
-    ? base64UrlEncodeNoPad(utf8ToBytes(String(config.TURNSTILE_SITEKEY)))
+    ? base64UrlEncodeNoPad(utf8ToBytes(config.TURNSTILE_SITEKEY))
     : "";
-  const glueUrl = typeof config.POW_GLUE_URL === "string" ? config.POW_GLUE_URL : "";
+  const glueUrl = config.POW_GLUE_URL;
   const atomicConsume = config.ATOMIC_CONSUME === true ? "1" : "0";
-  const atomicTurnQuery =
-    (typeof config.ATOMIC_TURN_QUERY === "string" && config.ATOMIC_TURN_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_TURN_QUERY;
-  const atomicTicketQuery =
-    (typeof config.ATOMIC_TICKET_QUERY === "string" &&
-      config.ATOMIC_TICKET_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_TICKET_QUERY;
-  const atomicConsumeQuery =
-    (typeof config.ATOMIC_CONSUME_QUERY === "string" &&
-      config.ATOMIC_CONSUME_QUERY.trim()) ||
-    DEFAULTS.ATOMIC_CONSUME_QUERY;
-  const atomicTurnHeader =
-    (typeof config.ATOMIC_TURN_HEADER === "string" && config.ATOMIC_TURN_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_TURN_HEADER;
-  const atomicTicketHeader =
-    (typeof config.ATOMIC_TICKET_HEADER === "string" &&
-      config.ATOMIC_TICKET_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_TICKET_HEADER;
-  const atomicConsumeHeader =
-    (typeof config.ATOMIC_CONSUME_HEADER === "string" &&
-      config.ATOMIC_CONSUME_HEADER.trim()) ||
-    DEFAULTS.ATOMIC_CONSUME_HEADER;
-  const atomicCookieName =
-    (typeof config.ATOMIC_COOKIE_NAME === "string" && config.ATOMIC_COOKIE_NAME.trim()) ||
-    DEFAULTS.ATOMIC_COOKIE_NAME;
+  const atomicTurnQuery = config.ATOMIC_TURN_QUERY.trim();
+  const atomicTicketQuery = config.ATOMIC_TICKET_QUERY.trim();
+  const atomicConsumeQuery = config.ATOMIC_CONSUME_QUERY.trim();
+  const atomicTurnHeader = config.ATOMIC_TURN_HEADER.trim();
+  const atomicTicketHeader = config.ATOMIC_TICKET_HEADER.trim();
+  const atomicConsumeHeader = config.ATOMIC_CONSUME_HEADER.trim();
+  const atomicCookieName = config.ATOMIC_COOKIE_NAME.trim();
   const atomicCfg = `${atomicConsume}|${atomicTurnQuery}|${atomicTicketQuery}|${atomicConsumeQuery}|${atomicTurnHeader}|${atomicTicketHeader}|${atomicConsumeHeader}|${atomicCookieName}`;
   const segmentLenFixed = Math.max(
     1,
@@ -1661,10 +1516,7 @@ const clearCookie = (headers, name) => {
   setCookie(headers, name, "deleted", 0);
 };
 
-const getPowSecret = (config) => {
-  const powToken = typeof config.POW_TOKEN === "string" ? config.POW_TOKEN : "";
-  return powToken;
-};
+const getPowSecret = (config) => config.POW_TOKEN;
 
 const bucketIdOf = (idx, max, bucketCount) => {
   const value = Math.floor(((idx - 1) * bucketCount) / max);
@@ -1854,7 +1706,7 @@ const handlePowCommit = async (request, url, nowSeconds, innerCtx) => {
   if (!rootBytes || rootBytes.length !== 32) {
     return S(400);
   }
-  const ttl = normalizeNumber(config.POW_COMMIT_TTL_SEC, DEFAULTS.POW_COMMIT_TTL_SEC) || 0;
+  const ttl = config.POW_COMMIT_TTL_SEC || 0;
   const exp = nowSeconds + Math.max(1, ttl);
   const spineSeed = randomBase64Url(16);
   const tb = needTurn ? await tbFromToken(turnToken) : "any";
@@ -1870,7 +1722,7 @@ const handlePowCommit = async (request, url, nowSeconds, innerCtx) => {
   );
   const value = `v4.${ticketB64}.${rootB64}.${bindingValues.pathHash}.${tb}.${nonce}.${exp}.${spineSeed}.${mac}`;
   const headers = new Headers();
-  setCookie(headers, DEFAULTS.POW_COMMIT_COOKIE, value, ttl);
+  setCookie(headers, config.POW_COMMIT_COOKIE, value, ttl);
   return new Response(null, { status: 200, headers });
 };
 
@@ -1937,7 +1789,7 @@ const handleTurn = async (request, url, nowSeconds, innerCtx) => {
 const handlePowChallenge = async (request, url, nowSeconds, innerCtx) => {
   if (!innerCtx) return S(500);
   const { config, powSecret, derived, cfgId } = innerCtx;
-  const commitCtx = loadCommitFromRequest(request);
+  const commitCtx = loadCommitFromRequest(request, config);
   if (!commitCtx) return deny();
   const { commit, ticket } = commitCtx;
   if (!ticketMatchesInner(ticket, cfgId)) return deny();
@@ -1976,7 +1828,7 @@ const handlePowChallenge = async (request, url, nowSeconds, innerCtx) => {
 const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
   if (!innerCtx) return S(500);
   const { config, powSecret, derived, cfgId } = innerCtx;
-  const commitCtx = loadCommitFromRequest(request);
+  const commitCtx = loadCommitFromRequest(request, config);
   if (!commitCtx) return deny();
   const { commit, ticket } = commitCtx;
   if (!ticketMatchesInner(ticket, cfgId)) return deny();
@@ -2241,7 +2093,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     const exp = nowSeconds + ttl;
     const mac = await makeConsumeMac(powSecret, commit.ticketB64, exp, tb, 3);
     const headers = new Headers();
-    clearCookie(headers, DEFAULTS.POW_COMMIT_COOKIE);
+    clearCookie(headers, config.POW_COMMIT_COOKIE);
     return J({ done: true, consume: `v2.${commit.ticketB64}.${exp}.${tb}.3.${mac}` }, 200, headers);
   }
 
@@ -2269,7 +2121,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     ttl,
     needTurn ? 3 : 1
   );
-  clearCookie(headers, DEFAULTS.POW_COMMIT_COOKIE);
+  clearCookie(headers, config.POW_COMMIT_COOKIE);
   return J({ done: true }, 200, headers);
 };
 
@@ -2277,11 +2129,13 @@ const handlePowApi = async (request, url, nowSeconds, innerCtx) => {
   if (request.method !== "POST") {
     return S(405);
   }
+  if (!innerCtx) return S(500);
+  const { config } = innerCtx;
   const path = normalizePath(url.pathname);
-  if (!path || !path.startsWith(`${POW_API_PREFIX}/`)) {
+  if (!path || !path.startsWith(`${config.POW_API_PREFIX}/`)) {
     return S(404);
   }
-  const action = path.slice(POW_API_PREFIX.length);
+  const action = path.slice(config.POW_API_PREFIX.length);
   if (action === "/commit") {
     return handlePowCommit(request, url, nowSeconds, innerCtx);
   }
@@ -2317,7 +2171,7 @@ export default {
       return S(204);
     }
 
-    if (requestPath.startsWith(`${POW_API_PREFIX}/`)) {
+    if (requestPath.startsWith(`${config.POW_API_PREFIX}/`)) {
       return handlePowApi(request, url, nowSeconds, innerCtx);
     }
 
@@ -2341,8 +2195,7 @@ export default {
     if (!powSecret) return S(500);
     if (needPow && !config.POW_ESM_URL) return S(500);
     if (needTurn) {
-      const sitekey =
-        typeof config.TURNSTILE_SITEKEY === "string" ? config.TURNSTILE_SITEKEY : "";
+      const sitekey = config.TURNSTILE_SITEKEY;
       const secret = getTurnSecret(config);
       if (!sitekey || !secret) return S(500);
     }

@@ -38,7 +38,10 @@ Notes:
   - `TURNSTILE_SITEKEY`
   - `TURNSTILE_SECRET`
 - `pattern` matching is first-match-wins; put more specific rules first.
-- `pow.js` keeps a minimal `DEFAULTS` set for immutable runtime constants and safe fallbacks; the inner header only carries resolved overrides + derived bindings to keep header size small.
+- `pow.js` does not embed `DEFAULTS/CONFIG/COMPILED`; configuration is entirely supplied by `pow-config`.
+- The inner header supports sharding via `X-Pow-Inner-Count` + `X-Pow-Inner-0..N-1`.
+- `POW_API_PREFIX` and `POW_COMMIT_COOKIE` are treated as global constants; `pow-config` supplies fixed defaults and per-entry overrides are ignored.
+- `pow.js` has no fallback: missing/invalid inner header or failed signature returns `500`.
 
 ## Config Reference
 
@@ -73,7 +76,7 @@ Each `CONFIG` entry looks like:
 | `ATOMIC_COOKIE_NAME` | `string` | `"__Secure-pow_a"` | Short-lived cookie name for atomic navigation redirects; cleared after use. |
 | `STRIP_ATOMIC_QUERY` | `boolean` | `true` | Remove atomic query params before proxying. |
 | `STRIP_ATOMIC_HEADERS` | `boolean` | `true` | Remove atomic headers before proxying. |
-| `POW_API_PREFIX` | `string` | `"/__pow"` | Global API prefix for PoW endpoints (edit `DEFAULTS` in `pow.js`; per-entry override is ignored). |
+| `POW_API_PREFIX` | `string` | `"/__pow"` | Global API prefix for PoW endpoints (fixed default from `pow-config`; per-entry override is ignored). |
 | `POW_GLUE_URL` | `string` | (repo-pinned) | ES module URL imported by the challenge page (client UI + orchestration). |
 | `POW_ESM_URL` | `string` | (repo-pinned) | ES module URL for the PoW solver (`computePoswCommit`). Required when `powcheck: true`. |
 | `POW_VERSION` | `number` | `3` | Ticket version (changing breaks existing cookies). |

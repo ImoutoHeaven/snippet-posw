@@ -130,7 +130,10 @@ test("challenge rejects binding mismatch after commit", async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (request) => {
-      if (request.headers.has("X-Pow-Inner")) {
+      const hasInner = Array.from(request.headers.keys()).some((key) =>
+        key.toLowerCase().startsWith("x-pow-inner")
+      );
+      if (hasInner) {
         return powHandler(request);
       }
       return new Response("ok", { status: 200 });

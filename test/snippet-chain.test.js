@@ -69,9 +69,10 @@ const buildPowModule = async (secret = "config-secret") => {
   return tmpPath;
 };
 
-const buildConfigModule = async (secret = "config-secret") => {
+const buildConfigModule = async (secret = "config-secret", options = {}) => {
   const repoRoot = fileURLToPath(new URL("..", import.meta.url));
   const powConfigSource = await readFile(join(repoRoot, "pow-config.js"), "utf8");
+  const gluePadding = options.longGlue ? "x".repeat(12000) : "";
   const compiledConfig = JSON.stringify([
     {
       host: { s: "^example\\.com$", f: "" },
@@ -83,6 +84,7 @@ const buildConfigModule = async (secret = "config-secret") => {
         POW_BIND_TLS: false,
         POW_BIND_COUNTRY: false,
         POW_BIND_ASN: false,
+        POW_GLUE_URL: `https://example.com/glue${gluePadding}`,
       },
     },
   ]);
@@ -108,7 +110,7 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (request) => {
-      if (request.headers.has("X-Pow-Inner")) {
+      if (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count")) {
         innerRequest = request;
         return powHandler(request);
       }
@@ -126,13 +128,52 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
     );
     assert.equal(res.status, 200);
     assert.ok(innerRequest, "pow-config forwards to pow.js");
-    assert.ok(innerRequest.headers.get("X-Pow-Inner"), "inner header set");
+    const innerPayload = innerRequest.headers.get("X-Pow-Inner");
+    const innerCount = innerRequest.headers.get("X-Pow-Inner-Count");
+    assert.ok(innerPayload || innerCount, "inner header set");
     assert.ok(innerRequest.headers.get("X-Pow-Inner-Mac"), "inner mac set");
     assert.equal(innerRequest.headers.get("CF-Connecting-IP"), clientIp);
     assert.ok(originRequest, "origin fetch called");
     assert.equal(originRequest.headers.get("X-Pow-Inner"), null);
     assert.equal(originRequest.headers.get("X-Pow-Inner-Mac"), null);
     assert.equal(originRequest.headers.get("CF-Connecting-IP"), clientIp);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config -> pow.js strips chunked inner headers", async () => {
+  const restoreGlobals = ensureGlobals();
+  const powPath = await buildPowModule();
+  const configPath = await buildConfigModule("config-secret", { longGlue: true });
+  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
+  const powHandler = powMod.default.fetch;
+  const configHandler = configMod.default.fetch;
+
+  let innerRequest = null;
+  let originRequest = null;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (request) => {
+      if (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count")) {
+        innerRequest = request;
+        return powHandler(request);
+      }
+      originRequest = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const res = await configHandler(new Request("https://example.com/protected"));
+    assert.equal(res.status, 200);
+    assert.ok(innerRequest, "pow-config forwards to pow.js");
+    assert.ok(innerRequest.headers.get("X-Pow-Inner-Count"), "chunked headers set");
+    assert.equal(innerRequest.headers.get("X-Pow-Inner"), null);
+    assert.ok(originRequest, "origin fetch called");
+    for (const key of originRequest.headers.keys()) {
+      assert.ok(!key.toLowerCase().startsWith("x-pow-inner"), `origin strips ${key}`);
+    }
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();

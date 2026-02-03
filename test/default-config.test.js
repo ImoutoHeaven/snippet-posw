@@ -61,6 +61,64 @@ const base64Url = (buffer) =>
     .replace(/\//g, "_")
     .replace(/=+$/u, "");
 
+const FULL_CONFIG = {
+  powcheck: false,
+  turncheck: false,
+  bindPathMode: "none",
+  bindPathQueryName: "path",
+  bindPathHeaderName: "",
+  stripBindPathHeader: false,
+  POW_VERSION: 3,
+  POW_API_PREFIX: "/__pow",
+  POW_DIFFICULTY_BASE: 8192,
+  POW_DIFFICULTY_COEFF: 1.0,
+  POW_MIN_STEPS: 512,
+  POW_MAX_STEPS: 8192,
+  POW_HASHCASH_BITS: 3,
+  POW_SEGMENT_LEN: "48-64",
+  POW_SAMPLE_K: 15,
+  POW_SPINE_K: 2,
+  POW_CHAL_ROUNDS: 12,
+  POW_OPEN_BATCH: 15,
+  POW_FORCE_EDGE_1: true,
+  POW_FORCE_EDGE_LAST: true,
+  POW_COMMIT_TTL_SEC: 120,
+  POW_TICKET_TTL_SEC: 600,
+  PROOF_TTL_SEC: 600,
+  PROOF_RENEW_ENABLE: false,
+  PROOF_RENEW_MAX: 2,
+  PROOF_RENEW_WINDOW_SEC: 90,
+  PROOF_RENEW_MIN_SEC: 30,
+  ATOMIC_CONSUME: false,
+  ATOMIC_TURN_QUERY: "__ts",
+  ATOMIC_TICKET_QUERY: "__tt",
+  ATOMIC_CONSUME_QUERY: "__ct",
+  ATOMIC_TURN_HEADER: "x-turnstile",
+  ATOMIC_TICKET_HEADER: "x-ticket",
+  ATOMIC_CONSUME_HEADER: "x-consume",
+  ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+  STRIP_ATOMIC_QUERY: true,
+  STRIP_ATOMIC_HEADERS: true,
+  INNER_AUTH_QUERY_NAME: "",
+  INNER_AUTH_QUERY_VALUE: "",
+  INNER_AUTH_HEADER_NAME: "",
+  INNER_AUTH_HEADER_VALUE: "",
+  stripInnerAuthQuery: false,
+  stripInnerAuthHeader: false,
+  POW_BIND_PATH: true,
+  POW_BIND_IPRANGE: true,
+  POW_BIND_COUNTRY: false,
+  POW_BIND_ASN: false,
+  POW_BIND_TLS: true,
+  IPV4_PREFIX: 32,
+  IPV6_PREFIX: 64,
+  POW_COMMIT_COOKIE: "__Host-pow_commit",
+  POW_ESM_URL:
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@412f7fcc71c319b62a614e4252280f2bb3d7302b/esm/esm.js",
+  POW_GLUE_URL:
+    "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@412f7fcc71c319b62a614e4252280f2bb3d7302b/glue.js",
+};
+
 const buildInnerHeaders = (payloadObj, secret) => {
   const payload = base64Url(Buffer.from(JSON.stringify(payloadObj), "utf8"));
   const mac = base64Url(crypto.createHmac("sha256", secret).update(payload).digest());
@@ -125,7 +183,7 @@ test("pow.js rejects placeholder CONFIG_SECRET", async () => {
       {
         v: 1,
         id: 0,
-        c: { powcheck: false, turncheck: false },
+        c: { ...FULL_CONFIG, POW_TOKEN: "test" },
         d: { ipScope: "any", country: "any", asn: "any", tlsFingerprint: "any" },
       },
       "replace-me"
@@ -163,7 +221,7 @@ test("valid inner header passes through", async () => {
       {
         v: 1,
         id: 0,
-        c: { powcheck: false, turncheck: false },
+        c: { ...FULL_CONFIG, POW_TOKEN: "test" },
         d: { ipScope: "any", country: "any", asn: "any", tlsFingerprint: "any" },
       },
       "config-secret"

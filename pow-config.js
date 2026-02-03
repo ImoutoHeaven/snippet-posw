@@ -68,6 +68,9 @@ const COMPILED_CONFIG = __COMPILED_CONFIG__.map((entry) => ({
 
 const INNER_HEADER = "X-Pow-Inner";
 const INNER_MAC = "X-Pow-Inner-Mac";
+const INNER_COUNT_HEADER = "X-Pow-Inner-Count";
+const INNER_HEADER_PREFIX = "X-Pow-Inner-";
+const INNER_CHUNK_SIZE = 1800;
 const CONFIG_SECRET = "replace-me";
 const isPlaceholderConfigSecret = (value) =>
   typeof value !== "string" || !value.trim() || value === "replace-me";
@@ -162,11 +165,42 @@ const normalizeNumber = (value, fallback) => {
   return Number.isFinite(num) ? num : fallback;
 };
 
+const normalizeNumberClamp = (value, fallback, min, max) => {
+  const num = normalizeNumber(value, fallback);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(max, Math.max(min, num));
+};
+
 const normalizeBoolean = (value, fallback) =>
   value === true ? true : value === false ? false : fallback;
 
 const normalizeString = (value, fallback) =>
   typeof value === "string" ? value : fallback;
+
+const clampIntRange = (value, min, max) =>
+  Math.min(max, Math.max(min, Math.floor(value)));
+
+const normalizeSegmentLen = (value, fallback) => {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return clampIntRange(value, 1, 64);
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return clampIntRange(Number(trimmed), 1, 64);
+    }
+    const match = trimmed.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (match) {
+      let min = clampIntRange(Number(match[1]), 1, 64);
+      let max = clampIntRange(Number(match[2]), 1, 64);
+      if (min > max) {
+        [min, max] = [max, min];
+      }
+      return `${min}-${max}`;
+    }
+  }
+  return fallback;
+};
 
 const normalizePath = (pathname) => {
   if (typeof pathname !== "string") return null;
@@ -366,16 +400,207 @@ const normalizeConfig = (baseConfig) => {
     ...merged,
     powcheck: normalizeBoolean(merged.powcheck, DEFAULTS.powcheck),
     turncheck: normalizeBoolean(merged.turncheck, DEFAULTS.turncheck),
+    bindPathMode: normalizeString(merged.bindPathMode, DEFAULTS.bindPathMode),
+    bindPathQueryName: normalizeString(merged.bindPathQueryName, DEFAULTS.bindPathQueryName),
+    bindPathHeaderName: normalizeString(merged.bindPathHeaderName, DEFAULTS.bindPathHeaderName),
+    stripBindPathHeader: normalizeBoolean(
+      merged.stripBindPathHeader,
+      DEFAULTS.stripBindPathHeader
+    ),
+    POW_VERSION: normalizeNumberClamp(merged.POW_VERSION, DEFAULTS.POW_VERSION, 1, 10),
+    POW_API_PREFIX: DEFAULTS.POW_API_PREFIX,
+    POW_DIFFICULTY_BASE: normalizeNumberClamp(
+      merged.POW_DIFFICULTY_BASE,
+      DEFAULTS.POW_DIFFICULTY_BASE,
+      1,
+      1000000000
+    ),
+    POW_DIFFICULTY_COEFF: normalizeNumberClamp(
+      merged.POW_DIFFICULTY_COEFF,
+      DEFAULTS.POW_DIFFICULTY_COEFF,
+      0,
+      100
+    ),
+    POW_MIN_STEPS: normalizeNumberClamp(
+      merged.POW_MIN_STEPS,
+      DEFAULTS.POW_MIN_STEPS,
+      1,
+      1000000
+    ),
+    POW_MAX_STEPS: normalizeNumberClamp(
+      merged.POW_MAX_STEPS,
+      DEFAULTS.POW_MAX_STEPS,
+      1,
+      1000000
+    ),
+    POW_HASHCASH_BITS: normalizeNumberClamp(
+      merged.POW_HASHCASH_BITS,
+      DEFAULTS.POW_HASHCASH_BITS,
+      0,
+      32
+    ),
+    POW_SEGMENT_LEN: normalizeSegmentLen(merged.POW_SEGMENT_LEN, DEFAULTS.POW_SEGMENT_LEN),
+    POW_SAMPLE_K: normalizeNumberClamp(
+      merged.POW_SAMPLE_K,
+      DEFAULTS.POW_SAMPLE_K,
+      1,
+      256
+    ),
+    POW_SPINE_K: normalizeNumberClamp(
+      merged.POW_SPINE_K,
+      DEFAULTS.POW_SPINE_K,
+      0,
+      256
+    ),
+    POW_CHAL_ROUNDS: normalizeNumberClamp(
+      merged.POW_CHAL_ROUNDS,
+      DEFAULTS.POW_CHAL_ROUNDS,
+      1,
+      256
+    ),
+    POW_OPEN_BATCH: normalizeNumberClamp(
+      merged.POW_OPEN_BATCH,
+      DEFAULTS.POW_OPEN_BATCH,
+      1,
+      256
+    ),
+    POW_FORCE_EDGE_1: normalizeBoolean(merged.POW_FORCE_EDGE_1, DEFAULTS.POW_FORCE_EDGE_1),
+    POW_FORCE_EDGE_LAST: normalizeBoolean(
+      merged.POW_FORCE_EDGE_LAST,
+      DEFAULTS.POW_FORCE_EDGE_LAST
+    ),
+    POW_COMMIT_TTL_SEC: normalizeNumberClamp(
+      merged.POW_COMMIT_TTL_SEC,
+      DEFAULTS.POW_COMMIT_TTL_SEC,
+      0,
+      1000000000
+    ),
+    POW_TICKET_TTL_SEC: normalizeNumberClamp(
+      merged.POW_TICKET_TTL_SEC,
+      DEFAULTS.POW_TICKET_TTL_SEC,
+      0,
+      1000000000
+    ),
+    PROOF_TTL_SEC: normalizeNumberClamp(
+      merged.PROOF_TTL_SEC,
+      DEFAULTS.PROOF_TTL_SEC,
+      0,
+      1000000000
+    ),
+    PROOF_RENEW_ENABLE: normalizeBoolean(
+      merged.PROOF_RENEW_ENABLE,
+      DEFAULTS.PROOF_RENEW_ENABLE
+    ),
+    PROOF_RENEW_MAX: normalizeNumberClamp(
+      merged.PROOF_RENEW_MAX,
+      DEFAULTS.PROOF_RENEW_MAX,
+      0,
+      1000
+    ),
+    PROOF_RENEW_WINDOW_SEC: normalizeNumberClamp(
+      merged.PROOF_RENEW_WINDOW_SEC,
+      DEFAULTS.PROOF_RENEW_WINDOW_SEC,
+      0,
+      1000000000
+    ),
+    PROOF_RENEW_MIN_SEC: normalizeNumberClamp(
+      merged.PROOF_RENEW_MIN_SEC,
+      DEFAULTS.PROOF_RENEW_MIN_SEC,
+      0,
+      1000000000
+    ),
+    ATOMIC_CONSUME: normalizeBoolean(merged.ATOMIC_CONSUME, DEFAULTS.ATOMIC_CONSUME),
+    ATOMIC_TURN_QUERY: normalizeString(merged.ATOMIC_TURN_QUERY, DEFAULTS.ATOMIC_TURN_QUERY),
+    ATOMIC_TICKET_QUERY: normalizeString(
+      merged.ATOMIC_TICKET_QUERY,
+      DEFAULTS.ATOMIC_TICKET_QUERY
+    ),
+    ATOMIC_CONSUME_QUERY: normalizeString(
+      merged.ATOMIC_CONSUME_QUERY,
+      DEFAULTS.ATOMIC_CONSUME_QUERY
+    ),
+    ATOMIC_TURN_HEADER: normalizeString(
+      merged.ATOMIC_TURN_HEADER,
+      DEFAULTS.ATOMIC_TURN_HEADER
+    ),
+    ATOMIC_TICKET_HEADER: normalizeString(
+      merged.ATOMIC_TICKET_HEADER,
+      DEFAULTS.ATOMIC_TICKET_HEADER
+    ),
+    ATOMIC_CONSUME_HEADER: normalizeString(
+      merged.ATOMIC_CONSUME_HEADER,
+      DEFAULTS.ATOMIC_CONSUME_HEADER
+    ),
+    ATOMIC_COOKIE_NAME: normalizeString(merged.ATOMIC_COOKIE_NAME, DEFAULTS.ATOMIC_COOKIE_NAME),
+    STRIP_ATOMIC_QUERY: normalizeBoolean(
+      merged.STRIP_ATOMIC_QUERY,
+      DEFAULTS.STRIP_ATOMIC_QUERY
+    ),
+    STRIP_ATOMIC_HEADERS: normalizeBoolean(
+      merged.STRIP_ATOMIC_HEADERS,
+      DEFAULTS.STRIP_ATOMIC_HEADERS
+    ),
+    INNER_AUTH_QUERY_NAME: normalizeString(
+      merged.INNER_AUTH_QUERY_NAME,
+      DEFAULTS.INNER_AUTH_QUERY_NAME
+    ),
+    INNER_AUTH_QUERY_VALUE: normalizeString(
+      merged.INNER_AUTH_QUERY_VALUE,
+      DEFAULTS.INNER_AUTH_QUERY_VALUE
+    ),
+    INNER_AUTH_HEADER_NAME: normalizeString(
+      merged.INNER_AUTH_HEADER_NAME,
+      DEFAULTS.INNER_AUTH_HEADER_NAME
+    ),
+    INNER_AUTH_HEADER_VALUE: normalizeString(
+      merged.INNER_AUTH_HEADER_VALUE,
+      DEFAULTS.INNER_AUTH_HEADER_VALUE
+    ),
+    stripInnerAuthQuery: normalizeBoolean(
+      merged.stripInnerAuthQuery,
+      DEFAULTS.stripInnerAuthQuery
+    ),
+    stripInnerAuthHeader: normalizeBoolean(
+      merged.stripInnerAuthHeader,
+      DEFAULTS.stripInnerAuthHeader
+    ),
     POW_BIND_PATH: normalizeBoolean(merged.POW_BIND_PATH, DEFAULTS.POW_BIND_PATH),
     POW_BIND_IPRANGE: normalizeBoolean(merged.POW_BIND_IPRANGE, DEFAULTS.POW_BIND_IPRANGE),
     POW_BIND_COUNTRY: normalizeBoolean(merged.POW_BIND_COUNTRY, DEFAULTS.POW_BIND_COUNTRY),
     POW_BIND_ASN: normalizeBoolean(merged.POW_BIND_ASN, DEFAULTS.POW_BIND_ASN),
     POW_BIND_TLS: normalizeBoolean(merged.POW_BIND_TLS, DEFAULTS.POW_BIND_TLS),
-    IPV4_PREFIX: normalizeNumber(merged.IPV4_PREFIX, DEFAULTS.IPV4_PREFIX),
-    IPV6_PREFIX: normalizeNumber(merged.IPV6_PREFIX, DEFAULTS.IPV6_PREFIX),
-    POW_API_PREFIX: normalizeString(merged.POW_API_PREFIX, DEFAULTS.POW_API_PREFIX),
-    POW_COMMIT_COOKIE: normalizeString(merged.POW_COMMIT_COOKIE, DEFAULTS.POW_COMMIT_COOKIE),
+    IPV4_PREFIX: normalizeNumberClamp(merged.IPV4_PREFIX, DEFAULTS.IPV4_PREFIX, 0, 32),
+    IPV6_PREFIX: normalizeNumberClamp(merged.IPV6_PREFIX, DEFAULTS.IPV6_PREFIX, 0, 128),
+    POW_COMMIT_COOKIE: DEFAULTS.POW_COMMIT_COOKIE,
+    POW_ESM_URL: normalizeString(merged.POW_ESM_URL, DEFAULTS.POW_ESM_URL),
+    POW_GLUE_URL: normalizeString(merged.POW_GLUE_URL, DEFAULTS.POW_GLUE_URL),
+    TURNSTILE_SITEKEY: normalizeString(merged.TURNSTILE_SITEKEY, ""),
+    TURNSTILE_SECRET: normalizeString(merged.TURNSTILE_SECRET, ""),
+    POW_TOKEN: typeof merged.POW_TOKEN === "string" ? merged.POW_TOKEN : undefined,
   };
+};
+
+const stripInnerHeaders = (headers) => {
+  for (const key of Array.from(headers.keys())) {
+    if (key.toLowerCase().startsWith("x-pow-inner")) {
+      headers.delete(key);
+    }
+  }
+  return headers;
+};
+
+const writeInnerHeaders = (headers, payload, mac) => {
+  if (payload.length <= INNER_CHUNK_SIZE) {
+    headers.set(INNER_HEADER, payload);
+  } else {
+    const count = Math.ceil(payload.length / INNER_CHUNK_SIZE);
+    headers.set(INNER_COUNT_HEADER, String(count));
+    for (let i = 0; i < count; i += 1) {
+      const start = i * INNER_CHUNK_SIZE;
+      headers.set(`${INNER_HEADER_PREFIX}${i}`, payload.slice(start, start + INNER_CHUNK_SIZE));
+    }
+  }
+  headers.set(INNER_MAC, mac);
 };
 
 const pickConfigWithId = (hostname, path) => {
@@ -525,11 +750,8 @@ export default {
       resolved.config
     );
 
-    const headers = new Headers(request.headers);
-    headers.delete(INNER_HEADER);
-    headers.delete(INNER_MAC);
-    headers.set(INNER_HEADER, payload);
-    headers.set(INNER_MAC, mac);
+    const headers = stripInnerHeaders(new Headers(request.headers));
+    writeInnerHeaders(headers, payload, mac);
 
     const forward = new Request(request, { headers });
     return fetch(forward);
