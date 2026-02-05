@@ -4,6 +4,7 @@ const PROOF_COOKIE = "__Host-proof";
 const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 const INNER_HEADER = "X-Pow-Inner";
 const INNER_MAC = "X-Pow-Inner-Mac";
+const INNER_EXPIRE_HEADER = "X-Pow-Inner-Expire";
 const INNER_COUNT_HEADER = `${INNER_HEADER}-Count`;
 const INNER_CHUNK_PREFIX = `${INNER_HEADER}-`;
 const INNER_CHUNK_MAX = 64;
@@ -60,6 +61,12 @@ const readInnerPayload = async (request) => {
   if (isPlaceholderConfigSecret(CONFIG_SECRET)) return null;
   let payload = request.headers.get(INNER_HEADER) || "";
   const mac = request.headers.get(INNER_MAC) || "";
+  const expRaw = request.headers.get(INNER_EXPIRE_HEADER) || "";
+  if (!/^[0-9]+$/.test(expRaw)) return null;
+  const exp = Number.parseInt(expRaw, 10);
+  if (!Number.isSafeInteger(exp)) return null;
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (exp < nowSec || exp > nowSec + 3) return null;
   if (!payload) {
     const countRaw = request.headers.get(INNER_COUNT_HEADER) || "";
     if (!/^[0-9]+$/.test(countRaw)) return null;
@@ -77,7 +84,7 @@ const readInnerPayload = async (request) => {
     payload = parts.join("");
   }
   if (!payload || !mac) return null;
-  const expected = await hmacSha256Base64UrlNoPad(CONFIG_SECRET, payload);
+  const expected = await hmacSha256Base64UrlNoPad(CONFIG_SECRET, `${payload}.${exp}`);
   if (!timingSafeEqual(expected, mac)) return null;
   const bytes = base64UrlDecodeToBytes(payload);
   if (!bytes) return null;

@@ -72,6 +72,16 @@ const base64UrlDecode = (value) => {
   }
 };
 
+const assertExpireWindow = (expireHeader) => {
+  const expire = Number.parseInt(expireHeader, 10);
+  assert.ok(Number.isSafeInteger(expire), "expire is integer seconds");
+  const now = Math.floor(Date.now() / 1000);
+  assert.ok(
+    expire >= now && expire <= now + 3,
+    "expire within expected window"
+  );
+};
+
 const readInnerPayload = (headers) => {
   const countHeader = headers.get("X-Pow-Inner-Count");
   if (countHeader) {
@@ -143,11 +153,13 @@ test("inner header signature helper matches node crypto", async () => {
     assert.equal(typeof hmac, "function");
 
     const payload = base64Url(Buffer.from("{\"v\":1}", "utf8"));
+    const expire = "1700000000";
+    const signatureInput = `${payload}.${expire}`;
     const secret = "config-secret";
     const expected = base64Url(
-      crypto.createHmac("sha256", secret).update(payload).digest()
+      crypto.createHmac("sha256", secret).update(signatureInput).digest()
     );
-    const actual = await hmac(secret, payload);
+    const actual = await hmac(secret, signatureInput);
 
     assert.equal(actual, expected);
   } finally {
@@ -180,8 +192,10 @@ test("pow-config injects signed header", async () => {
     assert.ok(forwarded, "fetch called with modified request");
     const { payload } = readInnerPayload(forwarded.headers);
     const mac = forwarded.headers.get("X-Pow-Inner-Mac") || "";
+    const expireHeader = forwarded.headers.get("X-Pow-Inner-Expire") || "";
     assert.ok(payload.length > 0, "payload header set");
     assert.ok(mac.length > 0, "mac header set");
+    assert.ok(expireHeader.length > 0, "expire header set");
     assert.notEqual(payload, "spoofed");
     assert.notEqual(mac, "spoofed");
 
@@ -191,8 +205,13 @@ test("pow-config injects signed header", async () => {
     assert.equal(parsed.v, 1);
     assert.equal(parsed.id, 0);
 
+    assertExpireWindow(expireHeader);
+
     const expectedMac = base64Url(
-      crypto.createHmac("sha256", "config-secret").update(payload).digest()
+      crypto
+        .createHmac("sha256", "config-secret")
+        .update(`${payload}.${expireHeader}`)
+        .digest()
     );
     assert.equal(mac, expectedMac);
   } finally {
@@ -225,8 +244,10 @@ test("pow-config injects chunked inner headers when payload is large", async () 
 
     const countHeader = forwarded.headers.get("X-Pow-Inner-Count");
     const mac = forwarded.headers.get("X-Pow-Inner-Mac") || "";
+    const expireHeader = forwarded.headers.get("X-Pow-Inner-Expire") || "";
     assert.ok(countHeader, "chunk count header set");
     assert.equal(forwarded.headers.get("X-Pow-Inner"), null);
+    assert.ok(expireHeader.length > 0, "expire header set");
 
     const count = Number.parseInt(countHeader, 10);
     assert.ok(Number.isFinite(count) && count > 1, "chunk count is numeric");
@@ -244,8 +265,13 @@ test("pow-config injects chunked inner headers when payload is large", async () 
     assert.equal(parsed.id, 0);
     assert.ok(parsed.c && typeof parsed.c.POW_GLUE_URL === "string");
 
+    assertExpireWindow(expireHeader);
+
     const expectedMac = base64Url(
-      crypto.createHmac("sha256", "config-secret").update(payload).digest()
+      crypto
+        .createHmac("sha256", "config-secret")
+        .update(`${payload}.${expireHeader}`)
+        .digest()
     );
     assert.equal(mac, expectedMac);
   } finally {

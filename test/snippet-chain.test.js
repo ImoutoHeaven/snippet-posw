@@ -132,10 +132,12 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
     const innerCount = innerRequest.headers.get("X-Pow-Inner-Count");
     assert.ok(innerPayload || innerCount, "inner header set");
     assert.ok(innerRequest.headers.get("X-Pow-Inner-Mac"), "inner mac set");
+    assert.ok(innerRequest.headers.get("X-Pow-Inner-Expire"), "inner expire set");
     assert.equal(innerRequest.headers.get("CF-Connecting-IP"), clientIp);
     assert.ok(originRequest, "origin fetch called");
     assert.equal(originRequest.headers.get("X-Pow-Inner"), null);
     assert.equal(originRequest.headers.get("X-Pow-Inner-Mac"), null);
+    assert.equal(originRequest.headers.get("X-Pow-Inner-Expire"), null);
     assert.equal(originRequest.headers.get("CF-Connecting-IP"), clientIp);
   } finally {
     globalThis.fetch = originalFetch;
@@ -169,6 +171,7 @@ test("pow-config -> pow.js strips chunked inner headers", async () => {
     assert.equal(res.status, 200);
     assert.ok(innerRequest, "pow-config forwards to pow.js");
     assert.ok(innerRequest.headers.get("X-Pow-Inner-Count"), "chunked headers set");
+    assert.ok(innerRequest.headers.get("X-Pow-Inner-Expire"), "inner expire set");
     assert.equal(innerRequest.headers.get("X-Pow-Inner"), null);
     assert.ok(originRequest, "origin fetch called");
     for (const key of originRequest.headers.keys()) {

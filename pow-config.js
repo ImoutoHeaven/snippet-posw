@@ -91,6 +91,7 @@ let COMPILED_CONFIG = (
 
 const INNER_HEADER = "X-Pow-Inner";
 const INNER_MAC = "X-Pow-Inner-Mac";
+const INNER_EXPIRE_HEADER = "X-Pow-Inner-Expire";
 const INNER_COUNT_HEADER = "X-Pow-Inner-Count";
 const INNER_HEADER_PREFIX = "X-Pow-Inner-";
 const INNER_CHUNK_SIZE = 1800;
@@ -923,7 +924,7 @@ const stripInnerHeaders = (headers) => {
   return headers;
 };
 
-const writeInnerHeaders = (headers, payload, mac) => {
+const writeInnerHeaders = (headers, payload, mac, exp) => {
   if (payload.length <= INNER_CHUNK_SIZE) {
     headers.set(INNER_HEADER, payload);
   } else {
@@ -935,6 +936,7 @@ const writeInnerHeaders = (headers, payload, mac) => {
     }
   }
   headers.set(INNER_MAC, mac);
+  headers.set(INNER_EXPIRE_HEADER, String(exp));
 };
 
 const pickConfigWithId = (request, url, hostname, path) => {
@@ -1065,8 +1067,9 @@ const buildSignedInnerPayload = async (request, cfgId, config) => {
   const derived = await buildDerivedBindings(request, normalizedConfig);
   const payloadObj = { v: 1, id: cfgId, c: normalizedConfig, d: derived };
   const payload = base64UrlEncodeNoPad(utf8ToBytes(JSON.stringify(payloadObj)));
-  const mac = await hmacSha256Base64UrlNoPad(CONFIG_SECRET, payload);
-  return { payload, mac };
+  const exp = Math.floor(Date.now() / 1000) + 3;
+  const mac = await hmacSha256Base64UrlNoPad(CONFIG_SECRET, `${payload}.${exp}`);
+  return { payload, mac, exp };
 };
 
 const resolveConfig = async (request, url, requestPath) => {
@@ -1099,14 +1102,14 @@ export default {
     }
 
     const resolved = await resolveConfig(request, url, requestPath);
-    const { payload, mac } = await buildSignedInnerPayload(
+    const { payload, mac, exp } = await buildSignedInnerPayload(
       request,
       resolved.cfgId,
       resolved.config
     );
 
     const headers = stripInnerHeaders(new Headers(request.headers));
-    writeInnerHeaders(headers, payload, mac);
+    writeInnerHeaders(headers, payload, mac, exp);
 
     const forward = new Request(request, { headers });
     return fetch(forward);

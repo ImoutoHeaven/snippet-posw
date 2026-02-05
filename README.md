@@ -41,8 +41,9 @@ Notes:
 - Rule matching is first-match-wins; put more specific rules first.
 - `pow.js` does not embed `DEFAULTS/CONFIG/COMPILED`; configuration is entirely supplied by `pow-config`.
 - The inner header supports sharding via `X-Pow-Inner-Count` + `X-Pow-Inner-0..N-1`.
+- The inner header includes `X-Pow-Inner-Expire`; the MAC is computed over `payload + "." + exp`.
 - `POW_API_PREFIX` and `POW_COMMIT_COOKIE` are treated as global constants; `pow-config` supplies fixed defaults and per-entry overrides are ignored.
-- `pow.js` has no fallback: missing/invalid inner header or failed signature returns `500`.
+- `pow.js` has no fallback: missing/invalid inner header, missing/out-of-window expire header, or failed signature returns `500`.
 
 ## Config Reference
 
