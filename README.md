@@ -22,22 +22,23 @@ This project provides a self-contained L7 front gate that:
 
 ## Configuration
 
-Edit `CONFIG` in `pow-config.js` to match your host/path patterns and enable **PoW** and/or **Turnstile**:
+Edit `CONFIG` in `pow-config.js` to match your host/path rules and enable **PoW** and/or **Turnstile**:
 
 ```js
 const CONFIG = [
-  { pattern: "example.com/**", config: { POW_TOKEN: "replace-me", powcheck: true } },
+  { host: "example.com", path: "/**", config: { POW_TOKEN: "replace-me", powcheck: true } },
 ];
 ```
 
 Notes:
 
 - `POW_TOKEN` is required when `powcheck` or `turncheck` is `true`.
+- `host` is required on every entry; legacy `pattern` is not supported.
 - Set `CONFIG_SECRET` to the same non-placeholder value in both `pow-config.js` and `pow.js`.
 - When `turncheck: true`, you must also set:
   - `TURNSTILE_SITEKEY`
   - `TURNSTILE_SECRET`
-- `pattern` matching is first-match-wins; put more specific rules first.
+- Rule matching is first-match-wins; put more specific rules first.
 - `pow.js` does not embed `DEFAULTS/CONFIG/COMPILED`; configuration is entirely supplied by `pow-config`.
 - The inner header supports sharding via `X-Pow-Inner-Count` + `X-Pow-Inner-0..N-1`.
 - `POW_API_PREFIX` and `POW_COMMIT_COOKIE` are treated as global constants; `pow-config` supplies fixed defaults and per-entry overrides are ignored.
@@ -48,14 +49,15 @@ Notes:
 Each `CONFIG` entry looks like:
 
 ```js
-{ pattern: "example.com/**", config: { /* keys below */ } }
+{ host: "example.com", path: "/**", config: { /* keys below */ } }
 ```
 
-### `pattern` syntax
+### `host`/`path` syntax
 
 | Field | Type | Description |
 |---|---|---|
-| `pattern` | `string` | Host pattern with optional path glob: `host` or `host/path`. Host `*` matches a single label fragment (does not cross `.`). Path supports `*` (no `/`) and `**` (may include `/`); a trailing `/**` also matches the base path (e.g. `/foo/**` matches `/foo` and `/foo/...`). |
+| `host` | `string` | Host glob. `*` matches a single label segment (does not cross `.`). |
+| `path` | `string` | Optional path glob. Supports `*` (no `/`) and `**` (may include `/`); a trailing `/**` also matches the base path (e.g. `/foo/**` matches `/foo` and `/foo/...`). Omit to match all paths on the host. |
 
 ### `config` keys (all supported)
 
@@ -149,7 +151,7 @@ IP matching:
 Examples:
 
 ```js
-{ pattern: "example.com/**", when: {
+{ host: "example.com", path: "/**", when: {
   and: [
     { ua: "mobile" },
     { header: { "x-debug": { exists: false } } },
@@ -159,7 +161,7 @@ Examples:
 ```
 
 ```js
-{ pattern: "example.com/**", when: {
+{ host: "example.com", path: "/**", when: {
   or: [
     { path: "/healthz" },
     { query: { "probe": { exists: true } } },
@@ -194,7 +196,7 @@ Configuration (exact match required):
 Example:
 
 ```js
-{ pattern: "example.com/**", config: {
+{ host: "example.com", path: "/**", config: {
   POW_TOKEN: "replace-me",
   powcheck: true,
   INNER_AUTH_QUERY_NAME: "auth",

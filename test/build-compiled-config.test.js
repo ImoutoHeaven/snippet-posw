@@ -16,7 +16,7 @@ const writeTempConfig = async (contents) => {
 test("buildCompiledConfig compiles when conditions", async () => {
   const filePath = await writeTempConfig(`
 const CONFIG = [
-  { pattern: "example.com/api/**", when: { ua: /bot/i }, config: { powcheck: true } },
+  { host: "example.com", path: "/api/**", when: { ua: /bot/i }, config: { powcheck: true } },
 ];
 `);
 
@@ -33,11 +33,49 @@ const CONFIG = [
 test("buildCompiledConfig rejects invalid when conditions", async () => {
   const filePath = await writeTempConfig(`
  const CONFIG = [
-   { pattern: "example.com/api/**", when: { foo: "bar" }, config: { powcheck: true } },
+   { host: "example.com", path: "/api/**", when: { foo: "bar" }, config: { powcheck: true } },
+ ];
+  `);
+
+  await assert.rejects(() => buildCompiledConfig(filePath), /unknown key/i);
+});
+
+test("buildCompiledConfig rejects legacy pattern key", async () => {
+  const filePath = await writeTempConfig(`
+ const CONFIG = [
+   { pattern: "example.com", config: { powcheck: true } },
+  ];
+ `);
+
+  await assert.rejects(() => buildCompiledConfig(filePath), /pattern/i);
+});
+
+test("buildCompiledConfig rejects missing or blank host", async () => {
+  const missingHostPath = await writeTempConfig(`
+ const CONFIG = [
+   { config: { powcheck: true } },
  ];
  `);
 
-  await assert.rejects(() => buildCompiledConfig(filePath), /unknown key/i);
+  await assert.rejects(() => buildCompiledConfig(missingHostPath), /host/i);
+
+  const blankHostPath = await writeTempConfig(`
+ const CONFIG = [
+   { host: "   ", config: { powcheck: true } },
+ ];
+ `);
+
+  await assert.rejects(() => buildCompiledConfig(blankHostPath), /host/i);
+});
+
+test("buildCompiledConfig rejects invalid path", async () => {
+  const filePath = await writeTempConfig(`
+ const CONFIG = [
+   { host: "example.com", path: "nope", config: { powcheck: true } },
+ ];
+ `);
+
+  await assert.rejects(() => buildCompiledConfig(filePath), /path/i);
 });
 
 test("buildCompiledConfig works without structuredClone", async () => {
@@ -46,7 +84,7 @@ test("buildCompiledConfig works without structuredClone", async () => {
     globalThis.structuredClone = undefined;
     const filePath = await writeTempConfig(`
 const CONFIG = [
-  { pattern: "example.com", config: { powcheck: true } },
+  { host: "example.com", config: { powcheck: true } },
 ];
 `);
 
@@ -63,24 +101,22 @@ const CONFIG = [
   }
 });
 
-test("buildCompiledConfig emits matcher metadata", async () => {
+test("buildCompiledConfig emits matcher metadata for host/path globs", async () => {
   const filePath = await writeTempConfig(`
-const CONFIG = [
-  { pattern: "example.com/foo/**", when: { ua: "bot" }, config: { powcheck: true } },
-  { pattern: "*.example.com/bar", config: { turncheck: true } },
-  { pattern: "foo*bar.example.com/baz", config: { softban: true } },
-  { pattern: "example.net/**", config: { allow: true } },
-  { pattern: "", config: { empty: true } },
-  { pattern: "   ", config: { blank: true } },
-  { pattern: "example.com", config: { hostonly: true } },
-  { pattern: "example.org/a/*/b/**", config: { multi: true } },
-  { pattern: "example.org/**/x", config: { multi2: true } },
-];
-`);
+ const CONFIG = [
+   { host: "example.com", path: "/foo/**", when: { ua: "bot" }, config: { powcheck: true } },
+   { host: "*.example.com", path: "/bar", config: { turncheck: true } },
+   { host: "foo*bar.example.com", path: "/baz", config: { softban: true } },
+   { host: "example.net", path: "/**", config: { allow: true } },
+   { host: "example.com", config: { hostonly: true } },
+   { host: "example.org", path: "/a/*/b/**", config: { multi: true } },
+   { host: "example.org", path: "/**/x", config: { multi2: true } },
+ ];
+ `);
 
   const compiled = JSON.parse(await buildCompiledConfig(filePath));
 
-  assert.equal(compiled.length, 9);
+  assert.equal(compiled.length, 7);
 
   const entry0 = compiled[0];
   assert.equal(entry0.hostType, "exact");
@@ -105,23 +141,15 @@ const CONFIG = [
   assert.equal(entry3.pathType, "regex");
 
   const entry4 = compiled[4];
-  assert.equal(entry4.hostType, null);
+  assert.equal(entry4.hostType, "exact");
+  assert.equal(entry4.hostExact, "example.com");
   assert.equal(entry4.pathType, null);
+  assert.equal(entry4.pathExact, null);
+  assert.equal(entry4.pathPrefix, null);
 
   const entry5 = compiled[5];
-  assert.equal(entry5.hostType, null);
-  assert.equal(entry5.pathType, null);
+  assert.equal(entry5.pathType, "regex");
 
   const entry6 = compiled[6];
-  assert.equal(entry6.hostType, "exact");
-  assert.equal(entry6.hostExact, "example.com");
-  assert.equal(entry6.pathType, null);
-  assert.equal(entry6.pathExact, null);
-  assert.equal(entry6.pathPrefix, null);
-
-  const entry7 = compiled[7];
-  assert.equal(entry7.pathType, "regex");
-
-  const entry8 = compiled[8];
-  assert.equal(entry8.pathType, "regex");
+  assert.equal(entry6.pathType, "regex");
 });
