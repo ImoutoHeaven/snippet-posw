@@ -1487,6 +1487,8 @@ const respondPowChallengeHtml = async (
   const headers = new Headers();
   headers.set("Content-Type", "text/html");
   headers.set("Cache-Control", "no-store");
+  headers.set("Content-Security-Policy", "frame-ancestors 'none'");
+  headers.set("X-Frame-Options", "DENY");
   return new Response(html, { status: 200, headers });
 };
 
@@ -1503,7 +1505,7 @@ const setCookie = (headers, name, value, maxAge) => {
     `${name}=${encodeURIComponent(String(value || ""))}`,
     "Path=/",
     "Secure",
-    "SameSite=None",
+    "SameSite=Lax",
     "HttpOnly",
   ];
   if (typeof maxAge === "number") {

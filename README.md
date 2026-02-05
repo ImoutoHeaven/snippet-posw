@@ -177,6 +177,8 @@ The gate issues a single proof cookie with a mode mask:
   - `2` = Turnstile
   - `3` = PoW + Turnstile
 
+Proof and commit cookies (`__Host-proof`, `__Host-pow_commit`) are issued with `SameSite=Lax`.
+
 A request is allowed when `(m & requiredMask) == requiredMask`.
 When `ATOMIC_CONSUME` is enabled and Turnstile is required, proof cookies are ignored; atomic tokens on the business request are mandatory.
 
@@ -227,6 +229,7 @@ Atomic consume (`ATOMIC_CONSUME=true`):
 - **Combined**: `/__pow/open` returns `{ done: true, consume: "v2..." }` and does **not** set `__Host-proof`. Client attaches `turnToken + consume` to the business request; the snippet verifies consume (HMAC + tb), binding, then `siteverify`.
 - **Transport**: cookie > header > query (header preferred over query when both present). Navigation tries a short-lived cookie first (Max-Age 5s, Path = target), then falls back to query; embedded flows use `postMessage` for header replay. Tokens are stripped when `STRIP_ATOMIC_QUERY/STRIP_ATOMIC_HEADERS` are `true`. The cookie is cleared after use.
 - **Navigation failure**: if atomic validation fails, navigation requests fall back to the challenge page (non-navigation still returns 403).
+- **Embedding**: the challenge page forbids iframe embedding (CSP/XFO). Atomic `postMessage` is restricted to same-origin parent/opener and uses a concrete origin.
 
 ### Early-bind (combined mode)
 

@@ -20,7 +20,7 @@ const setupDom = ({ onScriptAppend } = {}) => {
   const makeEl = (tag = "div") => ({
     tagName: tag,
     style: { setProperty() {} },
-    classList: { add() {}, remove() {} },
+    classList: { add() {}, remove() {}, contains() { return false; } },
     appendChild(child) {
       if (typeof onScriptAppend === "function" && tag === "head") {
         onScriptAppend(child);
@@ -189,5 +189,38 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
     const logEl = globalThis.document.getElementById("log");
     assert.ok(logEl.innerHTML.includes("&lt;img"));
     assert.equal(logEl.innerHTML.includes("<img"), false);
+  });
+
+  await t.test("atomic postMessage only targets same-origin parent/opener", async () => {
+    const calls = [];
+    const glue = await importGlue();
+    globalThis.window.location.href = "https://example.com/challenge";
+    globalThis.window.opener = {
+      closed: false,
+      location: { href: "https://evil.test/" },
+      postMessage: (msg, origin) => calls.push({ msg, origin, target: "opener" }),
+    };
+    globalThis.window.parent = {
+      closed: false,
+      location: { href: "https://example.com/outer" },
+      postMessage: (msg, origin) => calls.push({ msg, origin, target: "parent" }),
+    };
+    globalThis.window.turnstile = {
+      render: (el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      turnSiteKeyB64: base64Url("sitekey"),
+      atomicCfg: "1",
+    });
+    await glue.default(...args);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].target, "parent");
+    assert.equal(calls[0].origin, "https://example.com");
   });
 });

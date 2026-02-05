@@ -335,18 +335,43 @@ const addQuery = (url, kv) => {
   return next.toString();
 };
 
+const originFromLocation = (location) => {
+  try {
+    if (!location) return null;
+    if (typeof location.origin === "string" && location.origin) return location.origin;
+    if (typeof location.href === "string" && location.href) {
+      return new URL(location.href, window.location.href).origin;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+const selfOrigin = () => {
+  try {
+    return new URL(window.location.href).origin;
+  } catch {
+    return null;
+  }
+};
+
 const postAtomicMessage = (payload) => {
   const msg = { type: "POW_ATOMIC", ...(payload || {}) };
-  try {
-    if (window.opener && !window.opener.closed) {
-      window.opener.postMessage(msg, "*");
-    }
-  } catch {}
-  try {
-    if (window.parent && window.parent !== window) {
-      window.parent.postMessage(msg, "*");
-    }
-  } catch {}
+  const expectedOrigin = selfOrigin();
+  const postTo = (target) => {
+    try {
+      if (!target || typeof target.postMessage !== "function") return;
+      if (target.closed) return;
+      const targetOrigin = originFromLocation(target.location);
+      if (!expectedOrigin || targetOrigin !== expectedOrigin) return;
+      target.postMessage(msg, expectedOrigin);
+    } catch {}
+  };
+  postTo(window.opener);
+  if (window.parent && window.parent !== window) {
+    postTo(window.parent);
+  }
 };
 
 const createWorkerRpc = (worker, onProgress) => {

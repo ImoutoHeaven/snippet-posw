@@ -150,6 +150,12 @@ test("challenge rejects binding mismatch after commit", async () => {
       })
     );
     assert.equal(pageRes.status, 200);
+    const cspHeader = pageRes.headers.get("Content-Security-Policy");
+    assert.ok(
+      cspHeader && cspHeader.includes("frame-ancestors 'none'"),
+      "challenge page sets frame-ancestors to none"
+    );
+    assert.equal(pageRes.headers.get("X-Frame-Options"), "DENY");
     const html = await pageRes.text();
     const args = extractChallengeArgs(html);
     assert.ok(args, "challenge html includes args");
@@ -174,6 +180,7 @@ test("challenge rejects binding mismatch after commit", async () => {
     assert.equal(commitRes.status, 200);
     const setCookie = commitRes.headers.get("Set-Cookie");
     assert.ok(setCookie, "commit sets cookie");
+    assert.ok(setCookie.includes("SameSite=Lax"), "commit cookie uses SameSite=Lax");
     const commitCookie = setCookie.split(";")[0];
 
     const challengeResPrimary = await configHandler(
