@@ -1027,17 +1027,23 @@ const loadTurnstile = () => {
 };
 
 let recaptchaPromise;
-const loadRecaptcha = () => {
+let recaptchaRenderKey = "";
+const loadRecaptcha = (sitekey) => {
+  const key = String(sitekey || "");
+  if (!key) return Promise.reject(new Error("reCAPTCHA Load Failed"));
   if (window.grecaptcha) return Promise.resolve(window.grecaptcha);
-  if (recaptchaPromise) return recaptchaPromise;
+  if (recaptchaPromise && recaptchaRenderKey === key) return recaptchaPromise;
+  recaptchaRenderKey = key;
   recaptchaPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = "https://www.google.com/recaptcha/api.js?render=explicit";
+    script.src =
+      "https://www.google.com/recaptcha/api.js?render=" + encodeURIComponent(recaptchaRenderKey);
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.grecaptcha);
     script.onerror = () => {
       recaptchaPromise = null;
+      recaptchaRenderKey = "";
       reject(new Error("reCAPTCHA Load Failed"));
     };
     (document.head || document.documentElement).appendChild(script);
@@ -1046,7 +1052,7 @@ const loadRecaptcha = () => {
 };
 
 const executeRecaptcha = async (sitekey, action) => {
-  const grecaptcha = await loadRecaptcha();
+  const grecaptcha = await loadRecaptcha(sitekey);
   if (!grecaptcha || typeof grecaptcha.ready !== "function" || typeof grecaptcha.execute !== "function") {
     throw new Error("reCAPTCHA Load Failed");
   }
