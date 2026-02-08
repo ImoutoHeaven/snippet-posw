@@ -220,7 +220,7 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
     });
     await glue.default(...args);
     assert.equal(scriptCount, 1);
-    assert.equal(scriptSrc, "https://www.google.com/recaptcha/api.js?render=rk-1");
+    assert.equal(scriptSrc, "https://recaptcha.net/recaptcha/api.js?render=rk-1");
     assert.equal(executed.length, 2);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, "/__pow/cap");

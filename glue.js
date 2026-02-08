@@ -1037,7 +1037,7 @@ const loadRecaptcha = (sitekey) => {
   recaptchaPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src =
-      "https://www.google.com/recaptcha/api.js?render=" + encodeURIComponent(recaptchaRenderKey);
+      "https://recaptcha.net/recaptcha/api.js?render=" + encodeURIComponent(recaptchaRenderKey);
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(window.grecaptcha);
