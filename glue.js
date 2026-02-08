@@ -1053,15 +1053,26 @@ const loadRecaptcha = (sitekey) => {
 
 const executeRecaptcha = async (sitekey, action) => {
   const grecaptcha = await loadRecaptcha(sitekey);
-  if (!grecaptcha || typeof grecaptcha.ready !== "function" || typeof grecaptcha.execute !== "function") {
+  if (!grecaptcha || typeof grecaptcha.ready !== "function") {
+    recaptchaPromise = null;
+    recaptchaRenderKey = "";
     throw new Error("reCAPTCHA Load Failed");
   }
   return await new Promise((resolve, reject) => {
     try {
       grecaptcha.ready(() => {
-        Promise.resolve(grecaptcha.execute(sitekey, { action }))
-          .then((token) => resolve(token))
-          .catch(() => reject(new Error("reCAPTCHA Failed")));
+        try {
+          const execute = grecaptcha.execute;
+          if (typeof execute !== "function") {
+            reject(new Error("reCAPTCHA Load Failed"));
+            return;
+          }
+          Promise.resolve(execute.call(grecaptcha, sitekey, { action }))
+            .then((token) => resolve(token))
+            .catch(() => reject(new Error("reCAPTCHA Failed")));
+        } catch {
+          reject(new Error("reCAPTCHA Failed"));
+        }
       });
     } catch {
       reject(new Error("reCAPTCHA Failed"));

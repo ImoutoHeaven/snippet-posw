@@ -227,6 +227,43 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
     assert.deepEqual(JSON.parse(calls[0].body.captchaToken), { recaptcha_v3: "recaptcha-token-2" });
   });
 
+  await t.test("recaptcha waits for execute to appear after ready", async () => {
+    const calls = [];
+    const glue = await importGlue({
+      onScriptAppend: (el) => {
+        if (el && el.tagName === "script") {
+          queueMicrotask(() => {
+            globalThis.window.grecaptcha = {
+              ready(cb) {
+                queueMicrotask(() => {
+                  globalThis.window.grecaptcha.execute = async () => "recaptcha-token-late";
+                  cb();
+                });
+              },
+            };
+            if (typeof el.onload === "function") el.onload();
+          });
+        }
+      },
+    });
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({
+        recaptcha_v3: { sitekey: "rk-late", action: "p_late" },
+      }),
+    });
+    await glue.default(...args);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/__pow/cap");
+    assert.deepEqual(JSON.parse(calls[0].body.captchaToken), {
+      recaptcha_v3: "recaptcha-token-late",
+    });
+  });
+
   await t.test("runCaptcha supports turn+recaptcha sequence", async () => {
     const fetchCalls = [];
     const glue = await importGlue();
