@@ -74,6 +74,27 @@ const base64UrlDecode = (value) => {
 
 const encodeAtomicCookie = (value) => encodeURIComponent(value);
 
+const hmacSha256Base64Url = (secret, data) =>
+  base64Url(crypto.createHmac("sha256", secret).update(data).digest());
+
+const sha256Base64UrlTag = (value) =>
+  base64Url(crypto.createHash("sha256").update(value).digest().subarray(0, 12));
+
+const makePowBindingString = (ticket, hostname, pathHash, ipScope, country, asn, tlsFingerprint) =>
+  [
+    String(ticket.v),
+    String(ticket.e),
+    String(ticket.L),
+    String(ticket.r),
+    String(ticket.cfgId),
+    String(hostname || "").toLowerCase(),
+    pathHash,
+    ipScope,
+    country,
+    asn,
+    tlsFingerprint,
+  ].join("|");
+
 const assertExpireWindow = (expireHeader) => {
   const expire = Number.parseInt(expireHeader, 10);
   assert.ok(Number.isSafeInteger(expire), "expire is integer seconds");
@@ -969,6 +990,218 @@ test("pow-config frontloads atomic strategy with cookie priority and strips requ
     assert.equal(parsed.s.atomic.fromCookie, true);
     assert.ok(parsed.s.bypass && typeof parsed.s.bypass === "object");
     assert.ok(parsed.s.bind && typeof parsed.s.bind === "object");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config skips turnstile preflight when consume integrity precheck fails", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret", {
+    configOverrides: {
+      powcheck: true,
+      turncheck: true,
+      recaptchaEnabled: true,
+      RECAPTCHA_PAIRS: [{ sitekey: "rk1", secret: "rs1" }],
+      RECAPTCHA_MIN_SCORE: 0.5,
+      ATOMIC_CONSUME: true,
+      TURNSTILE_SITEKEY: "turn-site-key",
+      TURNSTILE_SECRET: "turn-secret",
+    },
+  });
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  let turnstileCalls = 0;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (String(request.url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        turnstileCalls += 1;
+        return new Response(JSON.stringify({ success: true, cdata: "mac" }), { status: 200 });
+      }
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const ticketB64 = base64Url(Buffer.from("1.1700000000.32.r.1.mac", "utf8"));
+    const envelope = JSON.stringify({
+      turnstile: "atomic-turn-token-1234567890",
+      recaptcha_v3: "atomic-recaptcha-token-1234567890",
+    });
+    const req = new Request(
+      `https://example.com/protected?__ts=${encodeURIComponent(envelope)}&__tt=${ticketB64}&__ct=not-a-valid-v2-consume`,
+      {
+        headers: {
+          "CF-Connecting-IP": "1.2.3.4",
+        },
+      }
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "request still forwards");
+    assert.equal(turnstileCalls, 0, "consume precheck failure should skip turnstile preflight");
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.checked, true);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.ok, false);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.reason, "consume_invalid");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config records turnstile preflight evidence for atomic dual-provider ticket flow", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret", {
+    configOverrides: {
+      powcheck: false,
+      turncheck: true,
+      recaptchaEnabled: true,
+      RECAPTCHA_PAIRS: [{ sitekey: "rk1", secret: "rs1" }],
+      RECAPTCHA_MIN_SCORE: 0.5,
+      ATOMIC_CONSUME: true,
+      TURNSTILE_SITEKEY: "turn-site-key",
+      TURNSTILE_SECRET: "turn-secret",
+    },
+  });
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  let turnstileCalls = 0;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (String(request.url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        turnstileCalls += 1;
+        return new Response(JSON.stringify({ success: true, cdata: ticket.mac }), { status: 200 });
+      }
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const now = Math.floor(Date.now() / 1000);
+    const ticket = {
+      v: 1,
+      e: now + 600,
+      L: 32,
+      r: base64Url(Buffer.from("ticket-random", "utf8")),
+      cfgId: 0,
+      mac: "",
+    };
+    const pathHash = base64Url(crypto.createHash("sha256").update("/protected").digest());
+    const binding = makePowBindingString(
+      ticket,
+      "example.com",
+      pathHash,
+      "1.2.3.4/32",
+      "any",
+      "any",
+      "any"
+    );
+    ticket.mac = hmacSha256Base64Url("pow-secret", binding);
+    const ticketB64 = base64Url(
+      Buffer.from(`${ticket.v}.${ticket.e}.${ticket.L}.${ticket.r}.${ticket.cfgId}.${ticket.mac}`, "utf8")
+    );
+
+    const turnToken = "atomic-turn-token-1234567890";
+    const envelope = JSON.stringify({
+      turnstile: turnToken,
+      recaptcha_v3: "atomic-recaptcha-token-1234567890",
+    });
+
+    const req = new Request(
+      `https://example.com/protected?__ts=${encodeURIComponent(envelope)}&__tt=${ticketB64}`,
+      {
+        headers: {
+          "CF-Connecting-IP": "1.2.3.4",
+        },
+      }
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "request forwards after successful preflight");
+    assert.equal(turnstileCalls, 1, "preflight should call turnstile siteverify once");
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.checked, true);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.ok, true);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.reason, "");
+    assert.equal(parsed.s.atomic.turnstilePreflight?.ticketMac, ticket.mac);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.tokenTag, sha256Base64UrlTag(turnToken));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config skips turnstile preflight when bind strategy is invalid", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret", {
+    configOverrides: {
+      powcheck: false,
+      turncheck: true,
+      recaptchaEnabled: true,
+      RECAPTCHA_PAIRS: [{ sitekey: "rk1", secret: "rs1" }],
+      RECAPTCHA_MIN_SCORE: 0.5,
+      ATOMIC_CONSUME: true,
+      TURNSTILE_SITEKEY: "turn-site-key",
+      TURNSTILE_SECRET: "turn-secret",
+      bindPathMode: "query",
+      bindPathQueryName: "path",
+    },
+  });
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  let turnstileCalls = 0;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (String(request.url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        turnstileCalls += 1;
+        return new Response(JSON.stringify({ success: true, cdata: "unused" }), { status: 200 });
+      }
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const envelope = JSON.stringify({
+      turnstile: "atomic-turn-token-1234567890",
+      recaptcha_v3: "atomic-recaptcha-token-1234567890",
+    });
+    const req = new Request(
+      `https://example.com/protected?__ts=${encodeURIComponent(envelope)}&__tt=${"a".repeat(128)}`,
+      {
+        headers: {
+          "CF-Connecting-IP": "1.2.3.4",
+        },
+      }
+    );
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "request still forwards with invalid bind strategy");
+    assert.equal(turnstileCalls, 0, "bind invalid should skip preflight call");
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.bind.ok, false);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.checked, false);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.ok, false);
+    assert.equal(parsed.s.atomic.turnstilePreflight?.reason, "not_applicable");
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();

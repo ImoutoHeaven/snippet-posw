@@ -185,6 +185,10 @@ const NONCE_MAX_LEN = 64;
 const SPINE_SEED_MIN_LEN = 16;
 const SPINE_SEED_MAX_LEN = 64;
 const CAPTCHA_TAG_LEN = 16;
+const TURN_TOKEN_MIN_LEN = 20;
+const TURN_TOKEN_MAX_LEN = 4096;
+const PREFLIGHT_REASON_MAX_LEN = 64;
+const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 
 const isBase64Url = (value, minLen, maxLen) => {
   if (typeof value !== "string") return false;
@@ -526,6 +530,43 @@ const validateAtomicSnapshot = (atomic) => {
   }
 
   if (atomic.ticketB64 && !BASE64URL_RE.test(atomic.ticketB64)) {
+    return { ok: false, status: 400 };
+  }
+
+  const preflight =
+    atomic.turnstilePreflight && typeof atomic.turnstilePreflight === "object"
+      ? atomic.turnstilePreflight
+      : null;
+  if (!preflight) {
+    return { ok: false, status: 400 };
+  }
+  if (
+    typeof preflight.checked !== "boolean" ||
+    typeof preflight.ok !== "boolean" ||
+    typeof preflight.reason !== "string" ||
+    typeof preflight.ticketMac !== "string" ||
+    typeof preflight.tokenTag !== "string"
+  ) {
+    return { ok: false, status: 400 };
+  }
+  if (
+    preflight.reason.length > PREFLIGHT_REASON_MAX_LEN ||
+    preflight.ticketMac.length > B64_HASH_MAX_LEN ||
+    preflight.tokenTag.length > CAPTCHA_TAG_LEN
+  ) {
+    return { ok: false, status: 431 };
+  }
+  if (
+    CONTROL_CHAR_RE.test(preflight.reason) ||
+    CONTROL_CHAR_RE.test(preflight.ticketMac) ||
+    CONTROL_CHAR_RE.test(preflight.tokenTag)
+  ) {
+    return { ok: false, status: 400 };
+  }
+  if (preflight.ticketMac && !BASE64URL_RE.test(preflight.ticketMac)) {
+    return { ok: false, status: 400 };
+  }
+  if (preflight.tokenTag && !BASE64URL_RE.test(preflight.tokenTag)) {
     return { ok: false, status: 400 };
   }
 
@@ -1278,6 +1319,316 @@ const parsePowTicket = (ticketB64) => {
   return { cfgId };
 };
 
+const parsePowTicketFull = (ticketB64) => {
+  if (!isBase64Url(ticketB64, 1, B64_TICKET_MAX_LEN)) return null;
+  const bytes = base64UrlDecodeToBytes(ticketB64);
+  if (!bytes) return null;
+  const raw = decoder.decode(bytes);
+  const parts = raw.split(".");
+  if (parts.length !== 6) return null;
+  const v = Number.parseInt(parts[0], 10);
+  const e = Number.parseInt(parts[1], 10);
+  const L = Number.parseInt(parts[2], 10);
+  const r = parts[3] || "";
+  const cfgId = Number.parseInt(parts[4], 10);
+  const mac = parts[5] || "";
+  if (!Number.isFinite(v) || v <= 0) return null;
+  if (!Number.isFinite(e) || e <= 0) return null;
+  if (!Number.isFinite(L) || L <= 0) return null;
+  if (!Number.isFinite(cfgId) || cfgId < 0) return null;
+  if (!isBase64Url(r, 1, B64_HASH_MAX_LEN)) return null;
+  if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
+  return { v, e, L, r, cfgId, mac, ticketB64 };
+};
+
+const parseConsumeToken = (value) => {
+  if (!value) return null;
+  const parts = value.split(".");
+  if (parts.length !== 6 || parts[0] !== "v2") return null;
+  const ticketB64 = parts[1] || "";
+  const exp = Number.parseInt(parts[2], 10);
+  const captchaTag = parts[3] || "";
+  const m = Number.parseInt(parts[4], 10);
+  const mac = parts[5] || "";
+  if (!Number.isFinite(exp) || exp <= 0) return null;
+  if (!Number.isFinite(m) || m < 0) return null;
+  if (!isBase64Url(ticketB64, 1, B64_TICKET_MAX_LEN)) return null;
+  if (!isBase64Url(captchaTag, CAPTCHA_TAG_LEN, CAPTCHA_TAG_LEN)) return null;
+  if (!isBase64Url(mac, 1, B64_HASH_MAX_LEN)) return null;
+  return { ticketB64, exp, captchaTag, m, mac };
+};
+
+const makeConsumeMac = async (powSecret, ticketB64, exp, captchaTag, m) =>
+  hmacSha256Base64UrlNoPad(powSecret, `U|${ticketB64}|${exp}|${captchaTag}|${m}`);
+
+const verifyConsumeIntegrity = async (consumeToken, powSecret, nowSeconds, requiredMask) => {
+  const parsed = parseConsumeToken(consumeToken);
+  if (!parsed) return null;
+  if (!powSecret) return null;
+  if (parsed.exp <= nowSeconds) return null;
+  if ((parsed.m & requiredMask) !== requiredMask) return null;
+  const expectedMac = await makeConsumeMac(
+    powSecret,
+    parsed.ticketB64,
+    parsed.exp,
+    parsed.captchaTag,
+    parsed.m
+  );
+  if (!timingSafeEqual(expectedMac, parsed.mac)) return null;
+  return parsed;
+};
+
+const computePathHash = async (canonicalPath) =>
+  base64UrlEncodeNoPad(await sha256Bytes(canonicalPath));
+
+const getPowBindingValuesWithPathHash = async (pathHash, config, derived) => {
+  const bindPath = config.POW_BIND_PATH !== false;
+  const bindIp = config.POW_BIND_IPRANGE !== false;
+  const bindCountry = config.POW_BIND_COUNTRY === true;
+  const bindAsn = config.POW_BIND_ASN === true;
+  const bindTls = config.POW_BIND_TLS === true;
+  const normalizedPathHash =
+    bindPath && typeof pathHash === "string" && pathHash ? pathHash : bindPath ? "" : "any";
+  if (bindPath && !normalizedPathHash) return null;
+  const source = derived && typeof derived === "object" ? derived : null;
+  const ipScope = bindIp && source && typeof source.ipScope === "string" ? source.ipScope : "";
+  if (bindIp && !ipScope) return null;
+  const country =
+    bindCountry && source && typeof source.country === "string" ? source.country : "";
+  if (bindCountry && !country) return null;
+  const asn = bindAsn && source && typeof source.asn === "string" ? source.asn : "";
+  if (bindAsn && !asn) return null;
+  const tlsFingerprint =
+    bindTls && source && typeof source.tlsFingerprint === "string" ? source.tlsFingerprint : "";
+  if (bindTls && !tlsFingerprint) return null;
+  return {
+    pathHash: normalizedPathHash,
+    ipScope: bindIp ? ipScope : "any",
+    country: bindCountry ? country : "any",
+    asn: bindAsn ? asn : "any",
+    tlsFingerprint: bindTls ? tlsFingerprint : "any",
+  };
+};
+
+const getPowBindingValues = async (canonicalPath, config, derived) => {
+  const bindPath = config.POW_BIND_PATH !== false;
+  const pathHash = bindPath ? await computePathHash(canonicalPath) : "any";
+  return getPowBindingValuesWithPathHash(pathHash, config, derived);
+};
+
+const makePowBindingString = (
+  ticket,
+  hostname,
+  pathHash,
+  ipScope,
+  country,
+  asn,
+  tlsFingerprint
+) => {
+  const host = typeof hostname === "string" ? hostname.toLowerCase() : "";
+  return (
+    ticket.v +
+    "|" +
+    ticket.e +
+    "|" +
+    ticket.L +
+    "|" +
+    ticket.r +
+    "|" +
+    ticket.cfgId +
+    "|" +
+    host +
+    "|" +
+    pathHash +
+    "|" +
+    ipScope +
+    "|" +
+    country +
+    "|" +
+    asn +
+    "|" +
+    tlsFingerprint
+  );
+};
+
+const verifyTicketMac = async (ticket, hostname, bindingValues, powSecret) => {
+  if (!powSecret) return "";
+  const bindingString = makePowBindingString(
+    ticket,
+    hostname,
+    bindingValues.pathHash,
+    bindingValues.ipScope,
+    bindingValues.country,
+    bindingValues.asn,
+    bindingValues.tlsFingerprint
+  );
+  const expectedMac = await hmacSha256Base64UrlNoPad(powSecret, bindingString);
+  if (!timingSafeEqual(expectedMac, ticket.mac)) return "";
+  return bindingString;
+};
+
+const readDualCaptchaTokens = (captchaToken) => {
+  const readFromObject = (parsed) => {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    const turnstile = typeof parsed.turnstile === "string" ? parsed.turnstile.trim() : "";
+    const recaptcha_v3 =
+      typeof parsed.recaptcha_v3 === "string" ? parsed.recaptcha_v3.trim() : "";
+    return { turnstile, recaptcha_v3 };
+  };
+
+  if (typeof captchaToken === "string") {
+    const single = captchaToken.trim();
+    if (!single || !(single.startsWith("{") && single.endsWith("}"))) return null;
+    try {
+      return readFromObject(JSON.parse(single));
+    } catch {
+      return null;
+    }
+  }
+
+  return readFromObject(captchaToken);
+};
+
+const validateTurnToken = (value) => {
+  if (!value || typeof value !== "string") return null;
+  const token = value.trim();
+  if (token.length < TURN_TOKEN_MIN_LEN || token.length > TURN_TOKEN_MAX_LEN) return null;
+  if (CONTROL_CHAR_RE.test(token)) return null;
+  return token;
+};
+
+const captchaTagFromToken = async (token) =>
+  base64UrlEncodeNoPad((await sha256Bytes(token)).slice(0, 12));
+
+const verifyTurnstileSiteverify = async (request, secret, token) => {
+  if (!secret || !token) return { ok: false, cdata: "" };
+  const form = new URLSearchParams();
+  form.set("secret", secret);
+  form.set("response", token);
+  const remoteip = getClientIP(request);
+  if (remoteip && remoteip !== "0.0.0.0") {
+    form.set("remoteip", remoteip);
+  }
+  let verifyRes;
+  try {
+    verifyRes = await fetch(TURNSTILE_SITEVERIFY_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+  } catch {
+    return { ok: false, cdata: "" };
+  }
+  let parsed;
+  try {
+    parsed = await verifyRes.json();
+  } catch {
+    parsed = null;
+  }
+  if (!parsed || parsed.success !== true) return { ok: false, cdata: "" };
+  return { ok: true, cdata: typeof parsed.cdata === "string" ? parsed.cdata : "" };
+};
+
+const defaultTurnstilePreflight = () => ({
+  checked: false,
+  ok: false,
+  reason: "not_applicable",
+  ticketMac: "",
+  tokenTag: "",
+});
+
+const shouldRunTurnstilePreflight = (requestPath, config, bind) =>
+  config.ATOMIC_CONSUME === true &&
+  config.turncheck === true &&
+  config.recaptchaEnabled === true &&
+  bind.ok === true &&
+  !requestPath.startsWith(`${config.POW_API_PREFIX}/`);
+
+const runTurnstilePreflight = async ({
+  request,
+  requestPath,
+  cfgId,
+  config,
+  bind,
+  atomic,
+  nowSeconds,
+  derived,
+}) => {
+  const preflight = {
+    checked: true,
+    ok: false,
+    reason: "missing_atomic",
+    ticketMac: "",
+    tokenTag: "",
+  };
+
+  const shouldCheck = shouldRunTurnstilePreflight(requestPath, config, bind);
+  if (!shouldCheck) return preflight;
+
+  const tokens = readDualCaptchaTokens(atomic.captchaToken);
+  const turnToken = validateTurnToken(tokens && tokens.turnstile);
+  const recaptchaToken = validateTurnToken(tokens && tokens.recaptcha_v3);
+  if (!turnToken || !recaptchaToken) {
+    preflight.reason = "missing_atomic";
+    return preflight;
+  }
+
+  const requiredMask = (config.powcheck === true ? 1 : 0) | 2 | 4;
+  const powSecret = typeof config.POW_TOKEN === "string" ? config.POW_TOKEN : "";
+  let ticket = null;
+  let nextDerived = derived;
+  const canonicalPath = bind.canonicalPath || requestPath;
+
+  if (config.powcheck === true) {
+    const consume = await verifyConsumeIntegrity(
+      atomic.consumeToken,
+      powSecret,
+      nowSeconds,
+      requiredMask
+    );
+    if (!consume) {
+      preflight.reason = "consume_invalid";
+      return preflight;
+    }
+    ticket = parsePowTicketFull(consume.ticketB64);
+    if (!ticket || ticket.cfgId !== cfgId) {
+      preflight.reason = "ticket_invalid";
+      return preflight;
+    }
+  } else {
+    ticket = parsePowTicketFull(atomic.ticketB64);
+    if (!ticket || ticket.cfgId !== cfgId || ticket.e <= nowSeconds) {
+      preflight.reason = "ticket_invalid";
+      return preflight;
+    }
+    if (!nextDerived) {
+      nextDerived = await buildDerivedBindings(request, config);
+    }
+    const bindingValues = await getPowBindingValues(canonicalPath, config, nextDerived);
+    if (!bindingValues) {
+      preflight.reason = "ticket_invalid";
+      return preflight;
+    }
+    const bindingString = await verifyTicketMac(ticket, new URL(request.url).hostname, bindingValues, powSecret);
+    if (!bindingString) {
+      preflight.reason = "ticket_invalid";
+      return preflight;
+    }
+  }
+
+  const verify = await verifyTurnstileSiteverify(request, config.TURNSTILE_SECRET, turnToken);
+  if (!verify.ok || verify.cdata !== ticket.mac) {
+    preflight.reason = "turn_verify_failed";
+    return preflight;
+  }
+
+  preflight.ok = true;
+  preflight.reason = "";
+  preflight.ticketMac = ticket.mac;
+  preflight.tokenTag = await captchaTagFromToken(turnToken);
+  return { ...preflight, derived: nextDerived };
+};
+
 const parsePowCommitCookie = (value) => {
   if (!value) return null;
   const parts = value.split(".");
@@ -1349,13 +1700,19 @@ const buildDerivedBindings = async (request, config) => {
   return { ipScope, country, asn, tlsFingerprint };
 };
 
-const buildSignedInnerPayload = async (request, cfgId, normalizedConfig, strategySnapshot) => {
-  const derived = await buildDerivedBindings(request, normalizedConfig);
+const buildSignedInnerPayload = async (
+  request,
+  cfgId,
+  normalizedConfig,
+  strategySnapshot,
+  derived = null
+) => {
+  const finalDerived = derived || (await buildDerivedBindings(request, normalizedConfig));
   const payloadObj = {
     v: 1,
     id: cfgId,
     c: normalizedConfig,
-    d: derived,
+    d: finalDerived,
     s: strategySnapshot,
   };
   const payload = base64UrlEncodeNoPad(utf8ToBytes(JSON.stringify(payloadObj)));
@@ -1407,6 +1764,31 @@ export default {
     const atomic = extractAtomicAuth(forwardRequest, forwardUrl, normalizedConfig);
     forwardRequest = atomic.forwardRequest;
 
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    let derivedBindings = null;
+    const preflight = defaultTurnstilePreflight();
+    const shouldRunPreflight = shouldRunTurnstilePreflight(requestPath, normalizedConfig, bind);
+    if (shouldRunPreflight) {
+      const result = await runTurnstilePreflight({
+        request: forwardRequest,
+        requestPath,
+        cfgId: resolved.cfgId,
+        config: normalizedConfig,
+        bind,
+        atomic,
+        nowSeconds,
+        derived: derivedBindings,
+      });
+      preflight.checked = result.checked;
+      preflight.ok = result.ok;
+      preflight.reason = result.reason;
+      preflight.ticketMac = result.ticketMac;
+      preflight.tokenTag = result.tokenTag;
+      if (result.derived && typeof result.derived === "object") {
+        derivedBindings = result.derived;
+      }
+    }
+
     const strategySnapshot = {
       nav: {},
       bypass: { bypass: bypass.bypass },
@@ -1421,6 +1803,7 @@ export default {
         consumeToken: atomic.consumeToken,
         fromCookie: atomic.fromCookie,
         cookieName: atomic.cookieName,
+        turnstilePreflight: preflight,
       },
     };
 
@@ -1433,7 +1816,8 @@ export default {
       forwardRequest,
       resolved.cfgId,
       normalizedConfig,
-      strategySnapshot
+      strategySnapshot,
+      derivedBindings
     );
 
     const headers = stripInnerHeaders(new Headers(forwardRequest.headers));

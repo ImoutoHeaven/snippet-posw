@@ -1287,9 +1287,11 @@ const runCaptcha = async (ticketB64, captchaCfg, submitToken) => {
     return buildCaptchaEnvelope({ recaptcha_v3: recapToken });
   }
 
-  const turnToken = await runTurnstile(ticketB64, captchaCfg.turnstile.sitekey);
   const recapCfg = captchaCfg.recaptcha_v3;
-  const recapToken = await runRecaptchaV3(recapCfg.sitekey, recapCfg.action || "submit");
+  const [turnToken, recapToken] = await Promise.all([
+    runTurnstile(ticketB64, captchaCfg.turnstile.sitekey),
+    runRecaptchaV3(recapCfg.sitekey, recapCfg.action || "submit"),
+  ]);
   const envelope = buildCaptchaEnvelope({ turnstile: turnToken, recaptcha_v3: recapToken });
   if (submitToken) await submitToken(envelope);
   return envelope;

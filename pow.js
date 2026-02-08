@@ -125,6 +125,7 @@ const SID_LEN = 16;
 const TOKEN_MIN_LEN = 16;
 const TOKEN_MAX_LEN = 64;
 const CAPTCHA_TAG_LEN = 16;
+const PREFLIGHT_REASON_MAX_LEN = 64;
 const TURN_TOKEN_MIN_LEN = 20;
 const TURN_TOKEN_MAX_LEN = 4096;
 const SPINE_SEED_MIN_LEN = 16;
@@ -769,6 +770,38 @@ const getPowBindingValues = async (canonicalPath, config, derived) => {
   return getPowBindingValuesWithPathHash(pathHash, config, derived);
 };
 
+const normalizeTurnstilePreflight = (raw) => {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  if (typeof raw.checked !== "boolean") return null;
+  if (typeof raw.ok !== "boolean") return null;
+  if (typeof raw.reason !== "string") return null;
+  if (typeof raw.ticketMac !== "string") return null;
+  if (typeof raw.tokenTag !== "string") return null;
+  if (
+    raw.reason.length > PREFLIGHT_REASON_MAX_LEN ||
+    raw.ticketMac.length > B64_HASH_MAX_LEN ||
+    raw.tokenTag.length > CAPTCHA_TAG_LEN
+  ) {
+    return null;
+  }
+  if (
+    CONTROL_CHAR_RE.test(raw.reason) ||
+    CONTROL_CHAR_RE.test(raw.ticketMac) ||
+    CONTROL_CHAR_RE.test(raw.tokenTag)
+  ) {
+    return null;
+  }
+  if (raw.ticketMac && !isBase64Url(raw.ticketMac, 1, B64_HASH_MAX_LEN)) return null;
+  if (raw.tokenTag && !isBase64Url(raw.tokenTag, 1, CAPTCHA_TAG_LEN)) return null;
+  return {
+    checked: raw.checked,
+    ok: raw.ok,
+    reason: raw.reason,
+    ticketMac: raw.ticketMac,
+    tokenTag: raw.tokenTag,
+  };
+};
+
 const normalizeInnerStrategy = (snapshot) => {
   if (!snapshot || typeof snapshot !== "object") return null;
   const nav = snapshot.nav && typeof snapshot.nav === "object" ? snapshot.nav : null;
@@ -785,6 +818,7 @@ const normalizeInnerStrategy = (snapshot) => {
   if (typeof atomicRaw.consumeToken !== "string") return null;
   if (typeof atomicRaw.fromCookie !== "boolean") return null;
   if (typeof atomicRaw.cookieName !== "string") return null;
+  const normalizedPreflight = normalizeTurnstilePreflight(atomicRaw.turnstilePreflight);
   return {
     nav,
     bypass: { bypass: bypassRaw.bypass },
@@ -799,6 +833,7 @@ const normalizeInnerStrategy = (snapshot) => {
       consumeToken: atomicRaw.consumeToken,
       fromCookie: atomicRaw.fromCookie,
       cookieName: atomicRaw.cookieName,
+      turnstilePreflight: normalizedPreflight,
     },
   };
 };
@@ -1037,8 +1072,12 @@ const verifyRequiredCaptchaForTicket = async (
   config,
   ticket,
   bindingString,
-  captchaToken
+  captchaToken,
+  options = {}
 ) => {
+  const opts = options && typeof options === "object" ? options : {};
+  const requireTurnPreflight = opts.requireTurnPreflight === true;
+  const turnstilePreflight = normalizeTurnstilePreflight(opts.turnstilePreflight);
   const needTurn = config.turncheck === true;
   const needRecaptcha = config.recaptchaEnabled === true;
   if (!needTurn && !needRecaptcha) return { ok: true, captchaTag: "any" };
@@ -1048,17 +1087,30 @@ const verifyRequiredCaptchaForTicket = async (
   let recaptchaToken = "";
 
   if (needTurn) {
-    const turnSecret = config.TURNSTILE_SECRET;
-    if (!turnSecret) return { ok: false, captchaTag: "" };
     turnToken = validateTurnToken(tokens.turnstile);
     if (!turnToken) return { ok: false, captchaTag: "" };
-    const turnOk = await verifyCaptchaForTicket(request, {
-      provider: "turnstile",
-      secret: turnSecret,
-      token: turnToken,
-      ticketMac: ticket.mac,
-    });
-    if (!turnOk) return { ok: false, captchaTag: "" };
+    if (requireTurnPreflight) {
+      if (!turnstilePreflight || !turnstilePreflight.checked || !turnstilePreflight.ok) {
+        return { ok: false, captchaTag: "" };
+      }
+      if (!timingSafeEqual(turnstilePreflight.ticketMac, ticket.mac)) {
+        return { ok: false, captchaTag: "" };
+      }
+      const expectedTokenTag = await captchaTagFromToken(turnToken);
+      if (!timingSafeEqual(turnstilePreflight.tokenTag, expectedTokenTag)) {
+        return { ok: false, captchaTag: "" };
+      }
+    } else {
+      const turnSecret = config.TURNSTILE_SECRET;
+      if (!turnSecret) return { ok: false, captchaTag: "" };
+      const turnOk = await verifyCaptchaForTicket(request, {
+        provider: "turnstile",
+        secret: turnSecret,
+        token: turnToken,
+        ticketMac: ticket.mac,
+      });
+      if (!turnOk) return { ok: false, captchaTag: "" };
+    }
   }
 
   if (needRecaptcha) {
@@ -2144,6 +2196,7 @@ export default {
       const baseRequest = request;
       const baseUrl = url;
       const atomic = strategy.atomic;
+      const requireTurnPreflight = needTurn && needRecaptcha;
       const fail = async (resp, allowChallenge = true) => {
         if (allowChallenge && isNavigationRequest(request)) {
           const challenge = await respondPowChallengeHtml(
@@ -2162,6 +2215,14 @@ export default {
         return atomic.fromCookie ? withClearedCookie(resp, atomic.cookieName) : resp;
       };
       if (atomic.captchaToken) {
+        if (
+          requireTurnPreflight &&
+          (!atomic.turnstilePreflight ||
+            atomic.turnstilePreflight.checked !== true ||
+            atomic.turnstilePreflight.ok !== true)
+        ) {
+          return await fail(deny());
+        }
         const tokenMap = readCaptchaTokens(atomic.captchaToken, needTurn, needRecaptcha);
         if (!tokenMap) return await fail(deny());
         const turnToken = needTurn ? validateTurnToken(tokenMap.turnstile) : "";
@@ -2194,7 +2255,11 @@ export default {
             config,
             ticket,
             atomicBinding,
-            atomic.captchaToken
+            atomic.captchaToken,
+            {
+              requireTurnPreflight,
+              turnstilePreflight: atomic.turnstilePreflight,
+            }
           );
           if (!verifiedCaptcha.ok || verifiedCaptcha.captchaTag !== consume.captchaTag) {
             return await fail(deny());
@@ -2222,7 +2287,11 @@ export default {
           config,
           ticket,
           atomicBinding,
-          atomic.captchaToken
+          atomic.captchaToken,
+          {
+            requireTurnPreflight,
+            turnstilePreflight: atomic.turnstilePreflight,
+          }
         );
         if (!verifiedCaptcha.ok) {
           return await fail(deny());

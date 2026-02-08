@@ -253,6 +253,25 @@ Atomic consume (`ATOMIC_CONSUME=true`):
 - **Navigation failure**: if atomic validation fails, navigation requests fall back to the challenge page (non-navigation still returns 403).
 - **Embedding**: the challenge page forbids iframe embedding (CSP/XFO). Atomic `postMessage` is restricted to same-origin parent/opener and uses a concrete origin.
 
+### Atomic dual-provider split (Turnstile + reCAPTCHA)
+
+When `ATOMIC_CONSUME=true` and both providers are required on a business request (`turncheck=true` + `recaptchaEnabled=true`):
+
+- `pow-config` performs Turnstile preflight (`siteverify`) after atomic prechecks (`consume` integrity for combined mode, ticket MAC/binding for captcha-only mode).
+- `pow-config` signs `atomic.turnstilePreflight` into `inner.s` (`checked/ok/reason/ticketMac/tokenTag`).
+- `pow.js` requires valid preflight evidence in this path, fail-closes on missing/mismatched evidence, skips Turnstile network verify, and only runs reCAPTCHA verify before origin fetch.
+
+Subrequest matrix (API + business paths):
+
+| Flow | `pow-config` subrequests | `pow.js` subrequests | Total |
+|---|---:|---:|---:|
+| Non-atomic (`ATOMIC_CONSUME=false`) via `/__pow/cap` | `0` | `1` (single provider) / `2` (dual provider) | `1` / `2` |
+| Non-atomic combined final `/__pow/open` | `0` | `1` (single provider) / `2` (dual provider) | `1` / `2` |
+| Atomic, single-provider business request | `1` (forward to `pow.js`) | `2` (provider verify + origin fetch) | `3` |
+| Atomic, dual-provider business request | `2` (Turnstile preflight + forward) | `2` (reCAPTCHA verify + origin fetch) | `4` |
+
+The key budget guardrail is per-snippet, not total chain calls: atomic dual-provider stays at `<=2` subrequests in each snippet scope.
+
 ### Early-bind (combined mode)
 
 In combined mode, PoW is bound to the active captcha token:

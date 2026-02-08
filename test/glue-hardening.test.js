@@ -264,12 +264,14 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
     });
   });
 
-  await t.test("runCaptcha supports turn+recaptcha sequence", async () => {
+  await t.test("runCaptcha runs turn+recaptcha concurrently and keeps envelope shape", async () => {
     const fetchCalls = [];
+    let solveTurnstile;
+    let recaptchaStarted = false;
     const glue = await importGlue();
     globalThis.window.turnstile = {
       render: (_el, opts) => {
-        queueMicrotask(() => opts.callback("turn-token"));
+        solveTurnstile = opts.callback;
         return 1;
       },
       reset() {},
@@ -280,6 +282,7 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
         cb();
       },
       execute: async (_sitekey, { action }) => {
+        recaptchaStarted = true;
         assert.equal(action, "p_abc123");
         return "recaptcha-token";
       },
@@ -295,7 +298,13 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
         recaptcha_v3: { sitekey: "rk-1", action: "p_abc123" },
       }),
     });
-    await glue.default(...args);
+    const runPromise = glue.default(...args);
+    await new Promise((resolve) => queueMicrotask(resolve));
+    assert.equal(recaptchaStarted, true);
+    assert.equal(fetchCalls.length, 0);
+    assert.equal(typeof solveTurnstile, "function");
+    solveTurnstile("turn-token");
+    await runPromise;
     assert.equal(fetchCalls.length, 1);
     assert.equal(fetchCalls[0].url, "/__pow/cap");
     assert.deepEqual(JSON.parse(fetchCalls[0].body.captchaToken), {
