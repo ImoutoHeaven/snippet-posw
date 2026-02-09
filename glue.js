@@ -241,6 +241,8 @@ const t = (key, vars) => translate(activeLocale, key, vars);
 const wrapSpan = (klass, text) => `<span class="${klass}">${text}</span>`;
 const doneMark = () => wrapSpan("green", t("done"));
 const yellowMark = (text) => wrapSpan("yellow", text);
+const RECAPTCHA_DISCLOSURE_HTML =
+  '<small class="recaptcha-disclosure">This site is protected by reCAPTCHA and the Google <a href="https://policies.google.com/privacy">Privacy Policy</a> and <a href="https://policies.google.com/terms">Terms of Service</a> apply.</small>';
 
 const ERROR_KEY_BY_MESSAGE = {
   "Request Failed": "request_failed",
@@ -504,6 +506,9 @@ const initUi = () => {
     "#log{font-family:var(--mono);font-size:13px;color:var(--sub);text-align:left;height:120px;overflow:hidden;position:relative;mask-image:linear-gradient(to bottom,transparent,black 30%);-webkit-mask-image:linear-gradient(to bottom,transparent,black 30%);display:flex;flex-direction:column;justify-content:flex-end;background:transparent;border:none;border-radius:0;padding:0;}",
     "#ts{margin-top:16px;display:flex;justify-content:center;max-height:0;opacity:0;overflow:hidden;transition:max-height 0.4s cubic-bezier(0.16,1,0.3,1),opacity 0.3s ease,margin-top 0.4s cubic-bezier(0.16,1,0.3,1);position:relative;z-index:2;}#ts.show{max-height:400px;opacity:1;margin-top:16px;}#ts.hide{max-height:0;opacity:0;margin-top:0;}",
     ".log-line{padding:3px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}.log-line .yellow{color:var(--yellow);}.log-line .green{color:var(--green);}",
+    ".log-line .recaptcha-disclosure{display:block;white-space:normal;line-height:1.35;}",
+    ".log-line .recaptcha-disclosure a{color:#93c5fd;text-decoration:underline;}",
+    ".grecaptcha-badge{visibility:hidden !important;}",
     "@keyframes fade-in{from{opacity:0;transform:scale(0.98)}to{opacity:1;transform:scale(1)}}",
     "@keyframes title-shine{0%{background-position:200% 0;}100%{background-position:-200% 0;}}"
   ].join("");
@@ -1000,6 +1005,13 @@ const log = (msg) => {
   lines.push(msg);
   render();
   return lines.length - 1;
+};
+
+let recaptchaDisclosureLogged = false;
+const logRecaptchaDisclosure = () => {
+  if (recaptchaDisclosureLogged) return;
+  recaptchaDisclosureLogged = true;
+  log(RECAPTCHA_DISCLOSURE_HTML);
 };
 
 const update = (idx, msg) => {
@@ -1616,6 +1628,9 @@ export default async function runPow(
         typeof captchaCfg.recaptcha_v3.sitekey === "string" &&
         captchaCfg.recaptcha_v3.sitekey
     );
+    if (needRecaptcha) {
+      logRecaptchaDisclosure();
+    }
     const needCaptcha = needTurn || needRecaptcha;
     const cfg = parseAtomicCfg(atomicCfg);
     const atomicEnabled = cfg.atomic;
