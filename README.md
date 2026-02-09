@@ -263,6 +263,18 @@ Disallowed verify points (no provider `siteverify` subrequest):
 
 Provider network verification is only performed at allowed points (`/__pow/cap`, non-atomic final `/__pow/open`, or atomic business-path consume).
 
+### 403 hint contract and `glue.js` routing
+
+- PoW API `403` responses may include compact header `x-pow-h` (one-word values only).
+- Current hint values:
+  - `stale`: expired/invalid ticket/session/captcha verification state.
+  - `cheat`: PoW/captcha binding tamper or proof/state mismatch.
+- `glue.js` routes `403` by `status + hint` (missing hint is treated as `stale` for backward compatibility):
+  - `stale` (and missing hint for backward compatibility) triggers a bounded page reload.
+  - Reload is debounced via `sessionStorage` (`2` attempts in `15s`); after limit it hard-fails.
+  - `cheat` hard-fails immediately (no reload path).
+- Client retries are transport-only: retry loop applies to fetch/network interruption errors, not HTTP status codes (including `403`).
+
 ### Atomic dual-provider split (Turnstile + reCAPTCHA)
 
 When `ATOMIC_CONSUME=true` and both providers are required on a business request (`turncheck=true` + `recaptchaEnabled=true`):

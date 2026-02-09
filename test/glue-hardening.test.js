@@ -62,6 +62,21 @@ const setupDom = ({ onScriptAppend } = {}) => {
     innerWidth: 1200,
     innerHeight: 800,
   };
+  const sessionStore = new Map();
+  globalThis.window.sessionStorage = {
+    getItem(key) {
+      return sessionStore.has(key) ? sessionStore.get(key) : null;
+    },
+    setItem(key, value) {
+      sessionStore.set(String(key), String(value));
+    },
+    removeItem(key) {
+      sessionStore.delete(String(key));
+    },
+    clear() {
+      sessionStore.clear();
+    },
+  };
   globalThis.window.parent = globalThis.window;
   Object.defineProperty(globalThis, "navigator", {
     value: { languages: ["en-US"], language: "en-US" },
@@ -311,6 +326,341 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
       turnstile: "turn-token",
       recaptcha_v3: "recaptcha-token",
     });
+  });
+
+  await t.test("403 stale hint triggers reload path", async () => {
+    let reloadCount = 0;
+    let attempts = 0;
+    const headers = new Map([["x-pow-h", "stale"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+    await glue.default(...args);
+    assert.equal(reloadCount, 1);
+    assert.equal(attempts, 1);
+  });
+
+  await t.test("stale reload debounce caps retries and then fails", async () => {
+    let reloadCount = 0;
+    let attempts = 0;
+    const headers = new Map([["x-pow-h", "stale"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+
+    await glue.default(...args);
+    await glue.default(...args);
+    await glue.default(...args);
+
+    assert.equal(attempts, 3);
+    assert.equal(reloadCount, 2);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("stale 403 fails gracefully when sessionStorage is unavailable", async () => {
+    let reloadCount = 0;
+    const headers = new Map([["x-pow-h", "stale"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.sessionStorage = undefined;
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 403,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+      json: async () => ({}),
+    });
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+
+    await glue.default(...args);
+
+    assert.equal(reloadCount, 0);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("stale 403 fails gracefully when sessionStorage.setItem throws", async () => {
+    let reloadCount = 0;
+    const headers = new Map([["x-pow-h", "stale"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.sessionStorage = {
+      getItem() {
+        return null;
+      },
+      setItem() {
+        throw new Error("quota");
+      },
+      removeItem() {},
+      clear() {},
+    };
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 403,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+      json: async () => ({}),
+    });
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+
+    await glue.default(...args);
+
+    assert.equal(reloadCount, 0);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("stale reload handles malformed sessionStorage payload without crash", async () => {
+    let reloadCount = 0;
+    const headers = new Map([["x-pow-h", "stale"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.sessionStorage.setItem("__pow_stale_reload_v1", "{bad-json");
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => ({
+      ok: false,
+      status: 403,
+      headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+      json: async () => ({}),
+    });
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+
+    await glue.default(...args);
+    await glue.default(...args);
+    await glue.default(...args);
+
+    assert.equal(reloadCount, 2);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("403 cheat hint hard-fails without reload", async () => {
+    let reloadCount = 0;
+    let attempts = 0;
+    const headers = new Map([["x-pow-h", "cheat"]]);
+    const glue = await importGlue();
+    globalThis.window.location.reload = () => {
+      reloadCount += 1;
+    };
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+    await glue.default(...args);
+    assert.equal(reloadCount, 0);
+    assert.equal(attempts, 1);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("500 response does not retry", async () => {
+    let attempts = 0;
+    const glue = await importGlue();
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 500,
+        headers: { get: () => null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+    await glue.default(...args);
+    assert.equal(attempts, 1);
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("turnstile submit 403 does not loop submit callback", async () => {
+    const calls = [];
+    const headers = new Map([["x-pow-h", "cheat"]]);
+    const glue = await importGlue();
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+    await glue.default(...args);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/__pow/cap");
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("recaptcha submit 403 does not loop submit callback", async () => {
+    const calls = [];
+    const headers = new Map([["x-pow-h", "cheat"]]);
+    const glue = await importGlue();
+    globalThis.window.grecaptcha = {
+      ready(cb) {
+        cb();
+      },
+      execute: async () => "recaptcha-token",
+    };
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), body: init && init.body ? JSON.parse(init.body) : null });
+      return {
+        ok: false,
+        status: 403,
+        headers: { get: (name) => headers.get(String(name).toLowerCase()) || null },
+        json: async () => ({}),
+      };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({
+        recaptcha_v3: { sitekey: "rk-1", action: "p_deadbeef00" },
+      }),
+    });
+    await glue.default(...args);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "/__pow/cap");
+    assert.equal(globalThis.document.getElementById("t").textContent, "Failed");
+  });
+
+  await t.test("network transport failure retries and succeeds", async () => {
+    let attempts = 0;
+    const glue = await importGlue();
+    globalThis.window.turnstile = {
+      render: (_el, opts) => {
+        queueMicrotask(() => opts.callback("turn-token"));
+        return 1;
+      },
+      reset() {},
+      remove() {},
+    };
+    globalThis.fetch = async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw new Error("connection reset");
+      }
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+    const args = makeRunPowArgs({
+      steps: 0,
+      captchaCfgB64: encodeCaptchaCfg({ turnstile: { sitekey: "ts-1" } }),
+    });
+    await glue.default(...args);
+    assert.equal(attempts, 3);
   });
 
   await t.test("error messages are escaped in logs", async () => {

@@ -337,6 +337,82 @@ const normalizeApiPrefix = (prefix) => {
   return prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
 };
 
+const STALE_RELOAD_STORAGE_KEY = "__pow_stale_reload_v1";
+const STALE_RELOAD_WINDOW_MS = 15000;
+const STALE_RELOAD_MAX_ATTEMPTS = 2;
+
+const sessionStorageSafe = () => {
+  try {
+    if (typeof window === "undefined" || !window.sessionStorage) return null;
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
+
+const shouldAttemptStaleReload = (nowMs = Date.now()) => {
+  const storage = sessionStorageSafe();
+  if (!storage) return false;
+  let count = 0;
+  try {
+    const raw = storage.getItem(STALE_RELOAD_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const ts = Number(parsed && parsed.ts);
+      const parsedCount = Number(parsed && parsed.count);
+      if (Number.isFinite(ts) && nowMs - ts <= STALE_RELOAD_WINDOW_MS) {
+        count = Number.isFinite(parsedCount) && parsedCount > 0 ? Math.floor(parsedCount) : 0;
+      }
+    }
+  } catch {}
+
+  if (count >= STALE_RELOAD_MAX_ATTEMPTS) return false;
+
+  try {
+    storage.setItem(
+      STALE_RELOAD_STORAGE_KEY,
+      JSON.stringify({ ts: nowMs, count: count + 1 })
+    );
+  } catch {
+    return false;
+  }
+  return true;
+};
+
+const buildApiError = (url, res) => {
+  let endpoint = String(url || "");
+  let path = endpoint;
+  try {
+    const parsed = new URL(endpoint, window.location.href);
+    endpoint = parsed.toString();
+    path = parsed.pathname;
+  } catch {}
+  const err = new Error(`HTTP ${res.status}`);
+  err.name = "ApiError";
+  err.status = Number(res.status || 0);
+  err.hint =
+    res && res.headers && typeof res.headers.get === "function"
+      ? String(res.headers.get("x-pow-h") || "").trim().toLowerCase()
+      : "";
+  err.endpoint = endpoint;
+  err.path = path;
+  return err;
+};
+
+const isApiError = (err) => Boolean(err && err.name === "ApiError" && Number(err.status));
+
+const isNetworkTransportError = (err) => {
+  if (!err) return false;
+  if (typeof DOMException !== "undefined" && err instanceof DOMException) {
+    return err.name === "AbortError";
+  }
+  if (err instanceof TypeError) return true;
+  const name = String(err.name || "").toLowerCase();
+  if (name === "aborterror") return true;
+  const msg = String(err.message || "").toLowerCase();
+  return /(network|fetch|connection|reset|econn|timed?\s*out|stream)/.test(msg);
+};
+
 const postJson = async (url, body, retries = 3) => {
   for (let i = 0; i <= retries; i++) {
     try {
@@ -346,10 +422,8 @@ const postJson = async (url, body, retries = 3) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
       });
-      if (res.status === 403) throw new Error("403");
       if (!res.ok) {
-        if (res.status >= 500 && i < retries) throw new Error("retry");
-        throw new Error("Request Failed");
+        throw buildApiError(url, res);
       }
       try {
         return await res.json();
@@ -357,7 +431,8 @@ const postJson = async (url, body, retries = 3) => {
         return {};
       }
     } catch (err) {
-      if (err && err.message === "403") throw err;
+      if (isApiError(err)) throw err;
+      if (!isNetworkTransportError(err)) throw err;
       if (i === retries) throw err;
       const delay = 500 * Math.pow(2, i);
       log(t("connection_retry", { ms: delay }));
@@ -1214,20 +1289,6 @@ const runTurnstile = async (ticketB64, sitekey, submitToken) => {
       }
       return token;
     } catch (e) {
-      if (submitToken && e && e.message === "403") {
-        update(submitLine, t("turnstile_rejected_retry"));
-        if (el) {
-          void el.offsetHeight;
-          requestAnimationFrame(() => {
-            el.classList.add("show");
-            el.classList.remove("hide");
-          });
-        }
-        if (attempt >= maxAttempts) throw new Error("Turnstile Rejected");
-        tokenPromise = nextToken();
-        if (ts && typeof ts.reset === "function") ts.reset(widgetId);
-        continue;
-      }
       throw e;
     }
   }
@@ -1261,11 +1322,6 @@ const runRecaptchaV3 = async (sitekey, action, submitToken) => {
       log(t("recaptcha_done", { done: doneMark() }));
       return token;
     } catch (error) {
-      if (submitToken && error && error.message === "403") {
-        if (submitLine !== -1) update(submitLine, t("recaptcha_rejected_retry"));
-        if (attempt >= maxAttempts) throw new Error("reCAPTCHA Rejected");
-        continue;
-      }
       throw error;
     }
   }
@@ -1743,9 +1799,14 @@ export default async function runPow(
     document.title = t("title_redirecting");
     window.location.replace(target);
   } catch (e) {
-    if (e && e.message === "403") {
-      log(t("session_expired_reload"));
-      setTimeout(() => window.location.reload(), 1000);
+    if (e && e.status === 403 && (e.hint === "stale" || !e.hint)) {
+      if (shouldAttemptStaleReload()) {
+        log(t("session_expired_reload"));
+        setTimeout(() => window.location.reload(), 1000);
+        return;
+      }
+      log(t("error_prefix", { message: localizeErrorMessage("Request Failed") }));
+      setStatus(false);
       return;
     }
     const raw = e && e.message ? e.message : String(e);

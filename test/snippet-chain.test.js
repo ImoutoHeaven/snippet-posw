@@ -812,6 +812,142 @@ test("/cap works for no-pow turnstile flow and issues proof", async () => {
   }
 });
 
+test("/cap returns stale hint when siteverify rejects", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const powPath = await buildPowModule();
+    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+    const powHandler = powMod.default.fetch;
+
+    const config = {
+      powcheck: false,
+      turncheck: true,
+      recaptchaEnabled: false,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 8192,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 8192,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 32,
+      POW_SAMPLE_K: 1,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+
+    const { payload, mac, exp } = buildInnerHeaders(
+      {
+        v: 1,
+        id: 113,
+        c: config,
+        d: { ipScope: "1.2.3.4/32", country: "any", asn: "any", tlsFingerprint: "any" },
+        s: {
+          nav: {},
+          bypass: { bypass: false },
+          bind: { ok: true, code: "", canonicalPath: "/protected" },
+          atomic: {
+            captchaToken: "",
+            ticketB64: "",
+            consumeToken: "",
+            fromCookie: false,
+            cookieName: "__Secure-pow_a",
+          },
+        },
+      },
+      "config-secret"
+    );
+
+    const pageRes = await powHandler(
+      new Request("https://example.com/protected", {
+        headers: {
+          Accept: "text/html",
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+      })
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args, "challenge args present");
+
+    globalThis.fetch = async (url) => {
+      if (String(url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        return new Response(JSON.stringify({ success: false }), { status: 200 });
+      }
+      return new Response("ok", { status: 200 });
+    };
+
+    const capRes = await powHandler(
+      new Request("https://example.com/__pow/cap", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+        body: JSON.stringify({
+          ticketB64: args.ticketB64,
+          pathHash: args.pathHash,
+          captchaToken: JSON.stringify({ turnstile: "turnstile-token-value-1234567890" }),
+        }),
+      })
+    );
+
+    assert.equal(capRes.status, 403);
+    assert.equal(capRes.headers.get("x-pow-h"), "stale");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
 test("/cap works for no-pow recaptcha flow and issues proof", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
@@ -1438,6 +1574,149 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
   }
 });
 
+test("/commit returns stale hint when ticket cfgId mismatches inner context", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const powPath = await buildPowModule();
+    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+    const powHandler = powMod.default.fetch;
+
+    const config = {
+      powcheck: true,
+      turncheck: false,
+      recaptchaEnabled: false,
+      RECAPTCHA_PAIRS: [],
+      RECAPTCHA_MIN_SCORE: 0.5,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 1,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 1,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 1,
+      POW_SAMPLE_K: 0,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+
+    const { payload, mac, exp } = buildInnerHeaders(
+      {
+        v: 1,
+        id: 140,
+        c: config,
+        d: { ipScope: "1.2.3.4/32", country: "any", asn: "any", tlsFingerprint: "any" },
+        s: {
+          nav: {},
+          bypass: { bypass: false },
+          bind: { ok: true, code: "", canonicalPath: "/protected" },
+          atomic: {
+            captchaToken: "",
+            ticketB64: "",
+            consumeToken: "",
+            fromCookie: false,
+            cookieName: "__Secure-pow_a",
+          },
+        },
+      },
+      "config-secret"
+    );
+
+    globalThis.fetch = async () => new Response("ok", { status: 200 });
+    const pageRes = await powHandler(
+      new Request("https://example.com/protected", {
+        headers: {
+          Accept: "text/html",
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+      })
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args, "challenge args present");
+
+    const ticket = decodeTicket(args.ticketB64);
+    assert.ok(ticket, "ticket decodes");
+    const tamperedTicketB64 = base64Url(
+      Buffer.from(
+        `${ticket.v}.${ticket.e}.${ticket.L}.${ticket.r}.${ticket.cfgId + 1}.${ticket.mac}`,
+        "utf8"
+      )
+    );
+
+    const commitRes = await powHandler(
+      new Request("https://example.com/__pow/commit", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+        body: JSON.stringify({
+          ticketB64: tamperedTicketB64,
+          rootB64: base64Url(crypto.randomBytes(32)),
+          pathHash: args.pathHash,
+          nonce: base64Url(crypto.randomBytes(16)),
+          captchaToken: "",
+        }),
+      })
+    );
+
+    assert.equal(commitRes.status, 403);
+    assert.equal(commitRes.headers.get("x-pow-h"), "stale");
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
 test("atomic /open final does not call siteverify", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
@@ -1652,7 +1931,7 @@ test("atomic /open final does not call siteverify", async () => {
   }
 });
 
-test("combined pow+captcha /open uses captchaToken and enforces verification", async () => {
+test("combined pow+captcha /open returns cheat hint for tampered payload and captcha mismatch", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
@@ -1847,6 +2126,62 @@ test("combined pow+captcha /open uses captchaToken and enforces verification", a
       ],
     };
 
+    const tamperedOpen = await powHandler(
+      new Request("https://example.com/__pow/open", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: commitCookie,
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+        body: JSON.stringify({
+          ...openBody,
+          captchaToken: goodEnvelope,
+          opens: [
+            {
+              ...openBody.opens[0],
+              hCurr: base64Url(crypto.randomBytes(32)),
+            },
+          ],
+        }),
+      })
+    );
+    assert.equal(tamperedOpen.status, 403);
+    assert.equal(tamperedOpen.headers.get("x-pow-h"), "cheat");
+
+    globalThis.fetch = async (url) => {
+      if (String(url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        return new Response(JSON.stringify({ success: false }), { status: 200 });
+      }
+      return new Response("ok", { status: 200 });
+    };
+    const staleOpen = await powHandler(
+      new Request("https://example.com/__pow/open", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: commitCookie,
+          "CF-Connecting-IP": "1.2.3.4",
+          "X-Pow-Inner": payload,
+          "X-Pow-Inner-Mac": mac,
+          "X-Pow-Inner-Expire": String(exp),
+        },
+        body: JSON.stringify({ ...openBody, captchaToken: goodEnvelope }),
+      })
+    );
+    assert.equal(staleOpen.status, 403);
+    assert.equal(staleOpen.headers.get("x-pow-h"), "stale");
+
+    globalThis.fetch = async (url) => {
+      if (String(url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        return new Response(JSON.stringify({ success: true, cdata: ticket.mac }), { status: 200 });
+      }
+      return new Response("ok", { status: 200 });
+    };
+
     const rejectOpen = await powHandler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
@@ -1862,6 +2197,7 @@ test("combined pow+captcha /open uses captchaToken and enforces verification", a
       })
     );
     assert.equal(rejectOpen.status, 403);
+    assert.equal(rejectOpen.headers.get("x-pow-h"), "cheat");
 
     const passOpen = await powHandler(
       new Request("https://example.com/__pow/open", {

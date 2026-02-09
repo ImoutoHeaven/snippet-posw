@@ -265,6 +265,14 @@ const S = (status) => new Response(null, { status });
 const J = (payload, status = 200, headers) =>
   new Response(JSON.stringify(payload), { status, headers });
 const deny = () => S(403);
+const POW_HINT_HEADER = "x-pow-h";
+const denyApi = (hint) => {
+  const headers = new Headers();
+  headers.set(POW_HINT_HEADER, hint);
+  return new Response(null, { status: 403, headers });
+};
+const denyStale = () => denyApi("stale");
+const denyCheat = () => denyApi("cheat");
 
 const withClearedCookie = (response, name) => {
   if (!name) return response;
@@ -1641,20 +1649,20 @@ const handlePowCommit = async (request, url, nowSeconds, innerCtx) => {
     return S(400);
   }
   const ticket = parsePowTicket(ticketB64);
-  if (!ticket) return deny();
-  if (!ticketMatchesInner(ticket, cfgId)) return deny();
+  if (!ticket) return denyStale();
+  if (!ticketMatchesInner(ticket, cfgId)) return denyStale();
   if (!powSecret) return S(500);
   if (config.powcheck !== true) return S(500);
   const needTurn = config.turncheck === true;
   const needRecaptcha = config.recaptchaEnabled === true;
   const powVersion = validateTicket(ticket, config, nowSeconds);
-  if (!powVersion) return deny();
+  if (!powVersion) return denyStale();
   const normalizedPathHash = normalizePathHash(pathHash, config);
   if (!normalizedPathHash) return S(400);
   const bindingValues = await getPowBindingValuesWithPathHash(normalizedPathHash, config, derived);
-  if (!bindingValues) return deny();
+  if (!bindingValues) return denyStale();
   const bindingString = await verifyTicketMac(ticket, url, bindingValues, powSecret);
-  if (!bindingString) return deny();
+  if (!bindingString) return denyStale();
   const rootBytes = base64UrlDecodeToBytes(rootB64);
   if (!rootBytes || rootBytes.length !== 32) {
     return S(400);
@@ -1724,11 +1732,11 @@ const handleCap = async (request, url, nowSeconds, innerCtx) => {
     captchaToken
   );
   if (!verifiedCaptcha.ok) {
-    return verifiedCaptcha.malformed ? S(400) : deny();
+    return verifiedCaptcha.malformed ? S(400) : denyStale();
   }
 
   const ttl = getProofTtl(ticket, config, nowSeconds);
-  if (!ttl) return deny();
+  if (!ttl) return denyStale();
   const headers = new Headers();
   await issueProofCookie(
     headers,
@@ -1821,7 +1829,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     return S(400);
   }
   const sidExpected = await derivePowSid(powSecret, ticket.cfgId, commit.mac);
-  if (sid !== sidExpected) return deny();
+  if (sid !== sidExpected) return denyCheat();
   const expectedToken = await makePowStateToken(
     powSecret,
     ticket.cfgId,
@@ -1831,19 +1839,19 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     batchMax,
     spinePos
   );
-  if (!timingSafeEqual(expectedToken, stateToken)) return deny();
+  if (!timingSafeEqual(expectedToken, stateToken)) return denyCheat();
   const sample = await buildPowSample(config, powSecret, ticket, commit.mac, sidExpected);
-  if (!sample) return deny();
+  if (!sample) return denyCheat();
   const { indices, segLensAll, hashcashBits, spineK } = sample;
   if (hashcashBits > 0 && !indices.includes(ticket.L)) {
-    return deny();
+    return denyCheat();
   }
   const expectedBatch = indices.slice(cursor, cursor + batchMax);
-  if (!expectedBatch.length) return deny();
+  if (!expectedBatch.length) return denyCheat();
   const segBatch = segLensAll.slice(cursor, cursor + batchMax);
   if (spinePos.length) {
     for (const pos of spinePos) {
-      if (pos >= expectedBatch.length) return deny();
+      if (pos >= expectedBatch.length) return denyCheat();
     }
   }
   const eligibleSpine = [];
@@ -1857,18 +1865,18 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
   }
   const expectedSpineCount = Math.min(spineK, eligibleSpine.length);
   if (spinePos.length !== expectedSpineCount) {
-    return deny();
+    return denyCheat();
   }
   if (expectedSpineCount > 0) {
     const eligibleSet = new Set(eligibleSpine);
     for (const pos of spinePos) {
-      if (!eligibleSet.has(pos)) return deny();
+      if (!eligibleSet.has(pos)) return denyCheat();
     }
   }
   const spinePosSet = spinePos.length ? new Set(spinePos) : null;
   const batchSize = opens.length;
   if (batchSize !== expectedBatch.length) {
-    return deny();
+    return denyCheat();
   }
   const batch = [];
   for (let i = 0; i < batchSize; i++) {
@@ -1878,11 +1886,11 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
       return S(400);
     }
     const expectedIdx = expectedBatch[i];
-    if (idx !== expectedIdx) return deny();
+    if (idx !== expectedIdx) return denyCheat();
     const requiresMid = spinePosSet && spinePosSet.has(i);
     const segLen = segBatch[i];
     if (!Number.isFinite(segLen) || segLen <= 0) {
-      return deny();
+      return denyCheat();
     }
     const hPrev = open && typeof open.hPrev === "string" ? open.hPrev : "";
     const hCurr = open && typeof open.hCurr === "string" ? open.hCurr : "";
@@ -1943,9 +1951,9 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     ? `${bindingString}|${commit.captchaTag}`
     : bindingString;
   const rootBytes = base64UrlDecodeToBytes(commit.rootB64);
-  if (!rootBytes || rootBytes.length !== 32) return deny();
+  if (!rootBytes || rootBytes.length !== 32) return denyCheat();
   const leafCount = Math.max(0, Math.floor(ticket.L)) + 1;
-  if (leafCount < 2) return deny();
+  if (leafCount < 2) return denyCheat();
   const seedHash = await hashPoswSeed(powBindingString, commit.nonce);
   for (const entry of batch) {
     const idx = entry.idx;
@@ -1962,7 +1970,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
     const effectiveSegmentLen = Math.min(segLen, idx);
     let prevBytes = hPrevBytes;
     const firstIdx = idx - effectiveSegmentLen;
-    if (firstIdx < 0) return deny();
+    if (firstIdx < 0) return denyCheat();
     const midIdx = requiresMid ? computeMidIndex(idx, segLen) : null;
     let midExpected = null;
     for (let step = 1; step <= effectiveSegmentLen; step++) {
@@ -1971,18 +1979,18 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
         midExpected = expected;
       }
       if (step === effectiveSegmentLen) {
-        if (!bytesEqual(expected, hCurrBytes)) return deny();
+        if (!bytesEqual(expected, hCurrBytes)) return denyCheat();
       } else {
         prevBytes = expected;
       }
     }
     if (requiresMid) {
-      if (midIdx === null || !midExpected) return deny();
+      if (midIdx === null || !midExpected) return denyCheat();
       const hMidBytes = base64UrlDecodeToBytes(String(open.hMid || ""));
       if (!hMidBytes || hMidBytes.length !== 32) {
         return S(400);
       }
-      if (!bytesEqual(midExpected, hMidBytes)) return deny();
+      if (!bytesEqual(midExpected, hMidBytes)) return denyCheat();
       const okMid = await verifyMerkleProof(
         rootBytes,
         hMidBytes,
@@ -1990,10 +1998,10 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
         leafCount,
         open.proofMid
       );
-      if (!okMid) return deny();
+      if (!okMid) return denyCheat();
     }
     if (idx === 1 && !bytesEqual(hPrevBytes, seedHash)) {
-      return deny();
+      return denyCheat();
     }
     const okPrev = await verifyMerkleProof(
       rootBytes,
@@ -2002,7 +2010,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
       leafCount,
       proofPrev
     );
-    if (!okPrev) return deny();
+    if (!okPrev) return denyCheat();
     const okCurr = await verifyMerkleProof(
       rootBytes,
       hCurrBytes,
@@ -2010,11 +2018,11 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
       leafCount,
       proofCurr
     );
-    if (!okCurr) return deny();
+    if (!okCurr) return denyCheat();
     if (idx === ticket.L && hashcashBits > 0) {
       const digest = await hashcashRootLast(rootBytes, hCurrBytes);
       if (leadingZeroBits(digest) < hashcashBits) {
-        return deny();
+        return denyCheat();
       }
     }
   }
@@ -2031,7 +2039,7 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
       nextCursor,
       batchMax
     );
-    if (!nextResp) return deny();
+    if (!nextResp) return denyCheat();
     return J(nextResp);
   }
   const ttl = getProofTtl(ticket, config, nowSeconds);
@@ -2039,8 +2047,8 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
 
   if ((needTurn || needRecaptcha) && config.ATOMIC_CONSUME === true) {
     const localCaptcha = await deriveLocalCaptchaTag(config, captchaToken);
-    if (!localCaptcha.ok) return localCaptcha.malformed ? S(400) : deny();
-    if (localCaptcha.captchaTag !== commit.captchaTag) return deny();
+    if (!localCaptcha.ok) return localCaptcha.malformed ? S(400) : denyStale();
+    if (localCaptcha.captchaTag !== commit.captchaTag) return denyCheat();
     const exp = nowSeconds + ttl;
     const mac = await makeConsumeMac(
       powSecret,
@@ -2068,8 +2076,8 @@ const handlePowOpen = async (request, url, nowSeconds, innerCtx) => {
       ticket,
       captchaToken
     );
-    if (!verifiedCaptcha.ok) return verifiedCaptcha.malformed ? S(400) : deny();
-    if (verifiedCaptcha.captchaTag !== commit.captchaTag) return deny();
+    if (!verifiedCaptcha.ok) return verifiedCaptcha.malformed ? S(400) : denyStale();
+    if (verifiedCaptcha.captchaTag !== commit.captchaTag) return denyCheat();
   }
 
   const headers = new Headers();
