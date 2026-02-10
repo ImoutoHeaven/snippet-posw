@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -65,6 +65,97 @@ const buildPowModule = async (secret = CONFIG_SECRET) => {
   const tmpPath = join(tmpDir, "pow.js");
   await writeFile(tmpPath, withSecret);
   return tmpPath;
+};
+
+const readOptionalFile = async (filePath) => {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+};
+
+const buildCoreModules = async (secret = CONFIG_SECRET) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    businessGateSource,
+    templateSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readOptionalFile(join(repoRoot, "lib", "pow", "inner-auth.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "internal-headers.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "api-engine.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "business-gate.js")),
+    readFile(join(repoRoot, "template.html"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
+  const tmpDir = await mkdtemp(join(tmpdir(), "pow-split-fail-closed-"));
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+  if (innerAuthSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource));
+  }
+  if (internalHeadersSource !== null) {
+    writes.push(
+      writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource)
+    );
+  }
+  if (apiEngineSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource));
+  }
+  if (businessGateSource !== null) {
+    const businessGateInjected = businessGateSource.replace(
+      /__HTML_TEMPLATE__/gu,
+      JSON.stringify(templateSource)
+    );
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "business-gate.js"), businessGateInjected));
+  }
+  await Promise.all(writes);
+
+  const nonce = `${Date.now()}-${Math.random()}`;
+  const [core1Module, core2Module] = await Promise.all([
+    import(`${pathToFileURL(join(tmpDir, "pow-core-1.js")).href}?v=${nonce}`),
+    import(`${pathToFileURL(join(tmpDir, "pow-core-2.js")).href}?v=${nonce}`),
+  ]);
+  return { core1Fetch: core1Module.default.fetch, core2Fetch: core2Module.default.fetch };
+};
+
+const makeSplitInnerHeaders = (payloadObj, secret = CONFIG_SECRET, expireOffsetSec = 2) => {
+  const payload = base64Url(Buffer.from(JSON.stringify(payloadObj), "utf8"));
+  const exp = Math.floor(Date.now() / 1000) + expireOffsetSec;
+  const mac = base64Url(crypto.createHmac("sha256", secret).update(`${payload}.${exp}`).digest());
+  return {
+    "X-Pow-Inner": payload,
+    "X-Pow-Inner-Mac": mac,
+    "X-Pow-Inner-Expire": String(exp),
+  };
 };
 
 const parseTicket = (ticketB64) => {
@@ -379,6 +470,39 @@ test("atomic captcha path cannot be bypassed by proof cookie", async () => {
     const out = await runAtomicProofBypassCase(mod.default.fetch);
     assert.equal(out.allowed, false);
   } finally {
+    restoreGlobals();
+  }
+});
+
+test("split core1 denies unauthorized non-navigation fail-closed", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const { core1Fetch, core2Fetch } = await buildCoreModules();
+    const payload = makeInnerPayload();
+
+    globalThis.fetch = async (request) => {
+      if (request.headers.has("X-Pow-Transit")) {
+        return core2Fetch(request);
+      }
+      return new Response("origin should not be reached", { status: 599 });
+    };
+
+    const res = await core1Fetch(
+      new Request("https://example.com/protected", {
+        headers: {
+          ...makeSplitInnerHeaders(payload),
+          Accept: "application/json",
+        },
+      }),
+      {},
+      {}
+    );
+
+    assert.equal(res.status, 403);
+    assert.deepEqual(await res.json(), { code: "pow_required" });
+  } finally {
+    globalThis.fetch = originalFetch;
     restoreGlobals();
   }
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -221,16 +221,245 @@ const makeConsumeToken = ({ powSecret, ticketB64, exp, captchaTag, mask }) => {
   return `v2.${ticketB64}.${exp}.${captchaTag}.${mask}.${mac}`;
 };
 
-const buildPowModule = async (secret = "config-secret") => {
+const readOptionalFile = async (filePath) => {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+};
+
+const buildCoreModules = async (secret = "config-secret") => {
   const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-  const powSource = await readFile(join(repoRoot, "pow.js"), "utf8");
-  const template = await readFile(join(repoRoot, "template.html"), "utf8");
-  const injected = powSource.replace(/__HTML_TEMPLATE__/gu, JSON.stringify(template));
-  const withSecret = replaceConfigSecret(injected, secret);
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    businessGateSource,
+    templateSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readOptionalFile(join(repoRoot, "lib", "pow", "inner-auth.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "internal-headers.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "api-engine.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "business-gate.js")),
+    readFile(join(repoRoot, "template.html"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
+
+  const tmpDir = await mkdtemp(join(tmpdir(), "pow-core-chain-"));
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+  if (innerAuthSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource));
+  }
+  if (internalHeadersSource !== null) {
+    writes.push(
+      writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource)
+    );
+  }
+  if (apiEngineSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource));
+  }
+  if (businessGateSource !== null) {
+    const businessGateInjected = businessGateSource.replace(
+      /__HTML_TEMPLATE__/gu,
+      JSON.stringify(templateSource)
+    );
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "business-gate.js"), businessGateInjected));
+  }
+  await Promise.all(writes);
+
+  const nonce = `${Date.now()}-${Math.random()}`;
+  const [core1Module, core2Module] = await Promise.all([
+    import(`${pathToFileURL(join(tmpDir, "pow-core-1.js")).href}?v=${nonce}`),
+    import(`${pathToFileURL(join(tmpDir, "pow-core-2.js")).href}?v=${nonce}`),
+  ]);
+  return {
+    core1Fetch: core1Module.default.fetch,
+    core2Fetch: core2Module.default.fetch,
+    tmpDir,
+  };
+};
+
+const normalizeApiPrefix = (value) => {
+  if (typeof value !== "string") return "/__pow";
+  const trimmed = value.trim();
+  if (!trimmed) return "/__pow";
+  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const normalized = withSlash.replace(/\/+$/u, "");
+  return normalized || "/__pow";
+};
+
+const makeTransitMac = ({ secret, exp, kind, method, pathname, apiPrefix }) => {
+  const normalizedMethod = typeof method === "string" && method ? method.toUpperCase() : "GET";
+  const normalizedPath =
+    typeof pathname === "string" && pathname
+      ? pathname.startsWith("/")
+        ? pathname
+        : `/${pathname}`
+      : "/";
+  const normalizedApiPrefix = normalizeApiPrefix(apiPrefix);
+  const macInput = `v1|${exp}|${kind}|${normalizedMethod}|${normalizedPath}|${normalizedApiPrefix}`;
+  return base64Url(crypto.createHmac("sha256", secret).update(macInput).digest());
+};
+
+const buildSplitApiHeaders = ({
+  payloadObj,
+  secret,
+  method,
+  pathname,
+  kind = "api",
+  apiPrefix,
+}) => {
+  const { payload, mac, exp } = buildInnerHeaders(payloadObj, secret);
+  const transitExpire = Math.floor(Date.now() / 1000) + 3;
+  const resolvedApiPrefix = normalizeApiPrefix(apiPrefix || payloadObj?.c?.POW_API_PREFIX);
+  const transitMac = makeTransitMac({
+    secret,
+    exp: transitExpire,
+    kind,
+    method,
+    pathname,
+    apiPrefix: resolvedApiPrefix,
+  });
+  return {
+    "X-Pow-Inner": payload,
+    "X-Pow-Inner-Mac": mac,
+    "X-Pow-Inner-Expire": String(exp),
+    "X-Pow-Transit": kind,
+    "X-Pow-Transit-Mac": transitMac,
+    "X-Pow-Transit-Expire": String(transitExpire),
+    "X-Pow-Transit-Api-Prefix": resolvedApiPrefix,
+  };
+};
+
+const buildCore1Module = async (secret = "config-secret") => {
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    businessGateSource,
+    templateSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readOptionalFile(join(repoRoot, "lib", "pow", "inner-auth.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "internal-headers.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "api-engine.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "business-gate.js")),
+    readFile(join(repoRoot, "template.html"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
+
   const tmpDir = await mkdtemp(join(tmpdir(), "pow-chain-"));
-  const tmpPath = join(tmpDir, "pow.js");
-  await writeFile(tmpPath, withSecret);
-  return tmpPath;
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+  if (innerAuthSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource));
+  }
+  if (internalHeadersSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource));
+  }
+  if (apiEngineSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource));
+  }
+  if (businessGateSource !== null) {
+    const businessGateInjected = businessGateSource.replace(
+      /__HTML_TEMPLATE__/gu,
+      JSON.stringify(templateSource)
+    );
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "business-gate.js"), businessGateInjected));
+  }
+
+const harnessSource = `
+import core1 from "./pow-core-1.js";
+import core2 from "./pow-core-2.js";
+
+const toRequest = (input, init) =>
+  input instanceof Request ? input : new Request(input, init);
+
+const isTransitRequest = (request) =>
+  request.headers.has("X-Pow-Transit");
+
+const splitTrace = {
+  core1Calls: 0,
+  core2Calls: 0,
+  originCalls: 0,
+};
+
+export default {
+  async fetch(request) {
+    const upstreamFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const nextRequest = toRequest(input, init);
+      if (isTransitRequest(nextRequest)) {
+        splitTrace.core2Calls += 1;
+        return core2.fetch(nextRequest);
+      }
+      splitTrace.originCalls += 1;
+      return upstreamFetch(input, init);
+    };
+    try {
+      splitTrace.core1Calls += 1;
+      return await core1.fetch(request);
+    } finally {
+      globalThis.fetch = upstreamFetch;
+    }
+  },
+};
+
+export const __splitTrace = splitTrace;
+`;
+  writes.push(writeFile(join(tmpDir, "pow-harness.js"), harnessSource));
+
+  await Promise.all(writes);
+  return join(tmpDir, "pow-harness.js");
 };
 
 const buildConfigModule = async (secret = "config-secret", options = {}) => {
@@ -262,13 +491,13 @@ const buildConfigModule = async (secret = "config-secret", options = {}) => {
   return tmpPath;
 };
 
-test("pow-config -> pow.js strips inner headers before origin fetch", async () => {
+test("pow-config -> split core chain strips inner headers before origin fetch", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
+  const core1Path = await buildCore1Module();
   const configPath = await buildConfigModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
   const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Handler = core1Mod.default.fetch;
   const configHandler = configMod.default.fetch;
 
   let innerRequest = null;
@@ -278,7 +507,7 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
     globalThis.fetch = async (request) => {
       if (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count")) {
         innerRequest = request;
-        return powHandler(request);
+        return core1Handler(request);
       }
       originRequest = request;
       return new Response("ok", { status: 200 });
@@ -293,7 +522,7 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
       })
     );
     assert.equal(res.status, 200);
-    assert.ok(innerRequest, "pow-config forwards to pow.js");
+    assert.ok(innerRequest, "pow-config forwards to split core chain");
     const innerPayload = innerRequest.headers.get("X-Pow-Inner");
     const innerCount = innerRequest.headers.get("X-Pow-Inner-Count");
     assert.ok(innerPayload || innerCount, "inner header set");
@@ -305,19 +534,23 @@ test("pow-config -> pow.js strips inner headers before origin fetch", async () =
     assert.equal(originRequest.headers.get("X-Pow-Inner-Mac"), null);
     assert.equal(originRequest.headers.get("X-Pow-Inner-Expire"), null);
     assert.equal(originRequest.headers.get("CF-Connecting-IP"), clientIp);
+    assert.ok(core1Mod.__splitTrace, "split trace is exposed");
+    assert.equal(core1Mod.__splitTrace.core1Calls, 1);
+    assert.equal(core1Mod.__splitTrace.core2Calls, 1);
+    assert.equal(core1Mod.__splitTrace.originCalls, 1);
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();
   }
 });
 
-test("pow-config -> pow.js strips chunked inner headers", async () => {
+test("pow-config -> split core chain strips chunked inner headers", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
+  const core1Path = await buildCore1Module();
   const configPath = await buildConfigModule("config-secret", { longGlue: true });
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
   const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Handler = core1Mod.default.fetch;
   const configHandler = configMod.default.fetch;
 
   let innerRequest = null;
@@ -327,7 +560,7 @@ test("pow-config -> pow.js strips chunked inner headers", async () => {
     globalThis.fetch = async (request) => {
       if (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count")) {
         innerRequest = request;
-        return powHandler(request);
+        return core1Handler(request);
       }
       originRequest = request;
       return new Response("ok", { status: 200 });
@@ -335,7 +568,7 @@ test("pow-config -> pow.js strips chunked inner headers", async () => {
 
     const res = await configHandler(new Request("https://example.com/protected"));
     assert.equal(res.status, 200);
-    assert.ok(innerRequest, "pow-config forwards to pow.js");
+    assert.ok(innerRequest, "pow-config forwards to split core chain");
     assert.ok(innerRequest.headers.get("X-Pow-Inner-Count"), "chunked headers set");
     assert.ok(innerRequest.headers.get("X-Pow-Inner-Expire"), "inner expire set");
     assert.equal(innerRequest.headers.get("X-Pow-Inner"), null);
@@ -349,13 +582,13 @@ test("pow-config -> pow.js strips chunked inner headers", async () => {
   }
 });
 
-test("pow-config strips atomic query/header before pow.js handoff", async () => {
+test("pow-config strips atomic query/header before split core handoff", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
+  const core1Path = await buildCore1Module();
   const configPath = await buildConfigModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
   const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Handler = core1Mod.default.fetch;
   const configHandler = configMod.default.fetch;
 
   let innerRequest = null;
@@ -365,7 +598,7 @@ test("pow-config strips atomic query/header before pow.js handoff", async () => 
     globalThis.fetch = async (request) => {
       if (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count")) {
         innerRequest = request;
-        return powHandler(request);
+        return core1Handler(request);
       }
       originRequest = request;
       return new Response("ok", { status: 200 });
@@ -381,7 +614,7 @@ test("pow-config strips atomic query/header before pow.js handoff", async () => 
       })
     );
     assert.equal(res.status, 200);
-    assert.ok(innerRequest, "pow-config forwards to pow.js");
+    assert.ok(innerRequest, "pow-config forwards to split core chain");
     assert.equal(innerRequest.headers.get("x-turnstile"), null);
     assert.equal(innerRequest.headers.get("x-ticket"), null);
     assert.equal(innerRequest.headers.get("x-consume"), null);
@@ -397,11 +630,11 @@ test("pow-config strips atomic query/header before pow.js handoff", async () => 
   }
 });
 
-test("pow.js consumes atomic only from inner.s (no request fallback)", async () => {
+test("split core chain consumes atomic only from inner.s (no request fallback)", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Path = await buildCore1Module();
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+  const core1Handler = core1Mod.default.fetch;
 
   const config = {
     powcheck: false,
@@ -490,7 +723,7 @@ test("pow.js consumes atomic only from inner.s (no request fallback)", async () 
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected?__ts=q-turn&__tt=q-ticket&__ct=1", {
         headers: {
           Accept: "application/json",
@@ -515,11 +748,11 @@ test("pow.js consumes atomic only from inner.s (no request fallback)", async () 
   }
 });
 
-test("pow.js returns captcha_required when recaptcha is enabled", async () => {
+test("split core chain returns captcha_required when recaptcha is enabled", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Path = await buildCore1Module();
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+  const core1Handler = core1Mod.default.fetch;
 
   const config = {
     powcheck: false,
@@ -606,7 +839,7 @@ test("pow.js returns captcha_required when recaptcha is enabled", async () => {
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async () => new Response("ok", { status: 200 });
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -629,9 +862,9 @@ test("pow.js returns captcha_required when recaptcha is enabled", async () => {
 test("pow api uses /cap and rejects /turn", async () => {
   const restoreGlobals = ensureGlobals();
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -712,7 +945,7 @@ test("pow api uses /cap and rejects /turn", async () => {
       "config-secret"
     );
 
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -726,7 +959,7 @@ test("pow api uses /cap and rejects /turn", async () => {
     );
     assert.notEqual(capRes.status, 404);
 
-    const turnRes = await powHandler(
+    const turnRes = await core1Handler(
       new Request("https://example.com/__pow/turn", {
         method: "POST",
         headers: {
@@ -748,9 +981,9 @@ test("/cap works for no-pow turnstile flow and issues proof", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -839,7 +1072,7 @@ test("/cap works for no-pow turnstile flow and issues proof", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -856,7 +1089,7 @@ test("/cap works for no-pow turnstile flow and issues proof", async () => {
     const ticket = decodeTicket(args.ticketB64);
     assert.ok(ticket, "ticket decodes");
 
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -888,9 +1121,9 @@ test("/cap returns stale hint when siteverify rejects", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -972,7 +1205,7 @@ test("/cap returns stale hint when siteverify rejects", async () => {
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -994,7 +1227,7 @@ test("/cap returns stale hint when siteverify rejects", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -1024,10 +1257,9 @@ test("/cap works for no-pow recaptcha flow and issues proof", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const recaptchaPairs = [{ sitekey: "rk-1", secret: "rs-1" }];
     const config = {
@@ -1112,7 +1344,7 @@ test("/cap works for no-pow recaptcha flow and issues proof", async () => {
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1148,7 +1380,7 @@ test("/cap works for no-pow recaptcha flow and issues proof", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -1180,9 +1412,9 @@ test("challenge payload uses configured recaptcha action override", async () => 
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -1268,7 +1500,7 @@ test("challenge payload uses configured recaptcha action override", async () => 
     );
 
     globalThis.fetch = async () => new Response("ok", { status: 200 });
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1295,9 +1527,9 @@ test("/cap returns 400 for malformed captcha envelope", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -1379,7 +1611,7 @@ test("/cap returns 400 for malformed captcha envelope", async () => {
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1400,7 +1632,7 @@ test("/cap returns 400 for malformed captcha envelope", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -1430,9 +1662,9 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: true,
@@ -1516,7 +1748,7 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1552,7 +1784,7 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
       return new Response("ok", { status: 200 });
     };
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -1576,7 +1808,7 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
     const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
     assert.ok(commitCookie, "commit cookie issued");
 
-    const challengeRes = await powHandler(
+    const challengeRes = await core1Handler(
       new Request("https://example.com/__pow/challenge", {
         method: "POST",
         headers: {
@@ -1597,7 +1829,7 @@ test("/commit, /challenge, and non-final /open do not call siteverify", async ()
     assert.equal(challenge.cursor, 0);
     const opens = buildMhgOpensForIndices(challenge.indices, witnessByIndex);
 
-    const nonFinalOpenRes = await powHandler(
+    const nonFinalOpenRes = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -1631,9 +1863,9 @@ test("/commit returns stale hint when ticket cfgId mismatches inner context", as
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: true,
@@ -1718,7 +1950,7 @@ test("/commit returns stale hint when ticket cfgId mismatches inner context", as
     );
 
     globalThis.fetch = async () => new Response("ok", { status: 200 });
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1742,7 +1974,7 @@ test("/commit returns stale hint when ticket cfgId mismatches inner context", as
       )
     );
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -1774,9 +2006,9 @@ test("atomic /open final does not call siteverify", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: true,
@@ -1860,7 +2092,7 @@ test("atomic /open final does not call siteverify", async () => {
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -1893,7 +2125,7 @@ test("atomic /open final does not call siteverify", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -1916,7 +2148,7 @@ test("atomic /open final does not call siteverify", async () => {
     const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
     assert.ok(commitCookie, "commit cookie issued");
 
-    const challengeRes = await powHandler(
+    const challengeRes = await core1Handler(
       new Request("https://example.com/__pow/challenge", {
         method: "POST",
         headers: {
@@ -1934,7 +2166,7 @@ test("atomic /open final does not call siteverify", async () => {
     const challenge = await challengeRes.json();
     const opens = buildMhgOpensForIndices(challenge.indices, witnessByIndex);
 
-    const openRes = await powHandler(
+    const openRes = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -1970,9 +2202,9 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: true,
@@ -2059,7 +2291,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
     const goodEnvelope = JSON.stringify({ turnstile: goodToken });
     const badEnvelope = JSON.stringify({ turnstile: badToken });
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -2093,7 +2325,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
       return new Response("ok", { status: 200 });
     };
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -2116,7 +2348,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
     const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
     assert.ok(commitCookie, "commit cookie issued");
 
-    const challengeRes = await powHandler(
+    const challengeRes = await core1Handler(
       new Request("https://example.com/__pow/challenge", {
         method: "POST",
         headers: {
@@ -2143,7 +2375,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
       opens,
     };
 
-    const tamperedOpen = await powHandler(
+    const tamperedOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2175,7 +2407,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
       }
       return new Response("ok", { status: 200 });
     };
-    const staleOpen = await powHandler(
+    const staleOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2199,7 +2431,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
       return new Response("ok", { status: 200 });
     };
 
-    const rejectOpen = await powHandler(
+    const rejectOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2216,7 +2448,7 @@ test("combined pow+captcha /open returns cheat hint for tampered payload and cap
     assert.equal(rejectOpen.status, 403);
     assert.equal(rejectOpen.headers.get("x-pow-h"), "cheat");
 
-    const passOpen = await powHandler(
+    const passOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2245,9 +2477,9 @@ test("non-atomic /open returns 400 for malformed captcha envelope", async () => 
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: true,
@@ -2329,7 +2561,7 @@ test("non-atomic /open returns 400 for malformed captcha envelope", async () => 
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -2376,7 +2608,7 @@ test("non-atomic /open returns 400 for malformed captcha envelope", async () => 
       return new Response("ok", { status: 200 });
     };
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -2399,7 +2631,7 @@ test("non-atomic /open returns 400 for malformed captcha envelope", async () => 
     const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
     assert.ok(commitCookie, "commit cookie issued");
 
-    const challengeRes = await powHandler(
+    const challengeRes = await core1Handler(
       new Request("https://example.com/__pow/challenge", {
         method: "POST",
         headers: {
@@ -2416,7 +2648,7 @@ test("non-atomic /open returns 400 for malformed captcha envelope", async () => 
     assert.equal(challengeRes.status, 200);
     const challenge = await challengeRes.json();
 
-    const malformedOpen = await powHandler(
+    const malformedOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2457,10 +2689,9 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const recaptchaPairs = [{ sitekey: "rk-1", secret: "rs-1" }];
     const goodToken = "recaptcha-token-good-1234567890";
@@ -2549,7 +2780,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
       "config-secret"
     );
 
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -2592,7 +2823,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const commitRes = await powHandler(
+    const commitRes = await core1Handler(
       new Request("https://example.com/__pow/commit", {
         method: "POST",
         headers: {
@@ -2615,7 +2846,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
     const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
     assert.ok(commitCookie, "commit cookie issued");
 
-    const challengeRes = await powHandler(
+    const challengeRes = await core1Handler(
       new Request("https://example.com/__pow/challenge", {
         method: "POST",
         headers: {
@@ -2640,7 +2871,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
       opens,
     };
 
-    const rejectUntaggedOpen = await powHandler(
+    const rejectUntaggedOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2660,7 +2891,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
     );
     assert.equal(rejectUntaggedOpen.status, 403);
 
-    const rejectOpen = await powHandler(
+    const rejectOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2676,7 +2907,7 @@ test("pow+recaptcha /open enforces commit captchaTag binding", async () => {
     );
     assert.equal(rejectOpen.status, 403);
 
-    const passOpen = await powHandler(
+    const passOpen = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -2705,10 +2936,9 @@ test("atomic recaptcha fast-path verifies and forwards without proof", async () 
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const recaptchaPairs = [{ sitekey: "rk-1", secret: "rs-1" }];
     const recaptchaToken = "atomic-recaptcha-token-1234567890";
@@ -2793,7 +3023,7 @@ test("atomic recaptcha fast-path verifies and forwards without proof", async () 
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -2842,7 +3072,7 @@ test("atomic recaptcha fast-path verifies and forwards without proof", async () 
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -2865,10 +3095,9 @@ test("atomic recaptcha+pow rejects consume token with mismatched captchaTag", as
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const recaptchaPairs = [{ sitekey: "rk-1", secret: "rs-1" }];
     const recaptchaToken = "atomic-recaptcha-token-1234567890";
@@ -2954,7 +3183,7 @@ test("atomic recaptcha+pow rejects consume token with mismatched captchaTag", as
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3014,7 +3243,7 @@ test("atomic recaptcha+pow rejects consume token with mismatched captchaTag", as
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3037,10 +3266,9 @@ test("atomic combined mode accepts turn+recaptcha token envelope", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const turnToken = "atomic-turn-token-1234567890";
     const recaptchaToken = "atomic-recaptcha-token-1234567890";
@@ -3125,7 +3353,7 @@ test("atomic combined mode accepts turn+recaptcha token envelope", async () => {
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3188,7 +3416,7 @@ test("atomic combined mode accepts turn+recaptcha token envelope", async () => {
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3213,9 +3441,9 @@ test("atomic dual-provider request without turnstilePreflight is denied", async 
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -3297,7 +3525,7 @@ test("atomic dual-provider request without turnstilePreflight is denied", async 
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3341,7 +3569,7 @@ test("atomic dual-provider request without turnstilePreflight is denied", async 
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3366,9 +3594,9 @@ test("atomic dual-provider malformed captcha envelope returns 400", async () => 
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const config = {
       powcheck: false,
@@ -3450,7 +3678,7 @@ test("atomic dual-provider malformed captcha envelope returns 400", async () => 
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3493,7 +3721,7 @@ test("atomic dual-provider malformed captcha envelope returns 400", async () => 
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3516,9 +3744,9 @@ test("atomic dual-provider request with mismatched preflight evidence is denied"
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const turnToken = "atomic-turn-token-1234567890";
     const config = {
@@ -3601,7 +3829,7 @@ test("atomic dual-provider request with mismatched preflight evidence is denied"
     };
 
     const stage1 = buildInnerHeaders(baseInner, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3657,7 +3885,7 @@ test("atomic dual-provider request with mismatched preflight evidence is denied"
       return new Response("ok", { status: 200 });
     };
 
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3682,7 +3910,7 @@ test("atomic dual-provider path keeps each snippet <= 2 subrequests", async () =
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
+    const core1Path = await buildCore1Module();
     const configPath = await buildConfigModule("config-secret", {
       configOverrides: {
         turncheck: true,
@@ -3694,11 +3922,10 @@ test("atomic dual-provider path keeps each snippet <= 2 subrequests", async () =
         TURNSTILE_SECRET: "turn-secret",
       },
     });
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
     const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
+    const core1Handler = core1Mod.default.fetch;
     const configHandler = configMod.default.fetch;
-    const testing = powMod.__captchaTesting;
 
     let scope = "";
     const runInScope = async (nextScope, fn) => {
@@ -3722,7 +3949,7 @@ test("atomic dual-provider path keeps each snippet <= 2 subrequests", async () =
 
       if (inConfig && (request.headers.has("X-Pow-Inner") || request.headers.has("X-Pow-Inner-Count"))) {
         counters.config += 1;
-        return runInScope("pow", async () => powHandler(request));
+        return runInScope("pow", async () => core1Handler(request));
       }
 
       if (inConfig) counters.config += 1;
@@ -3800,10 +4027,9 @@ test("atomic recaptcha mode disables proof-cookie bypass", async () => {
   const restoreGlobals = ensureGlobals();
   const originalFetch = globalThis.fetch;
   try {
-    const powPath = await buildPowModule();
-    const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-    const powHandler = powMod.default.fetch;
-    const testing = powMod.__captchaTesting;
+    const core1Path = await buildCore1Module();
+    const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+    const core1Handler = core1Mod.default.fetch;
 
     const recaptchaPairs = [{ sitekey: "rk-1", secret: "rs-1" }];
     const baseConfig = {
@@ -3885,7 +4111,7 @@ test("atomic recaptcha mode disables proof-cookie bypass", async () => {
       },
     };
     const inner1 = buildInnerHeaders(inner1Obj, "config-secret");
-    const pageRes = await powHandler(
+    const pageRes = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "text/html",
@@ -3918,7 +4144,7 @@ test("atomic recaptcha mode disables proof-cookie bypass", async () => {
       }
       return new Response("ok", { status: 200 });
     };
-    const capRes = await powHandler(
+    const capRes = await core1Handler(
       new Request("https://example.com/__pow/cap", {
         method: "POST",
         headers: {
@@ -3947,7 +4173,7 @@ test("atomic recaptcha mode disables proof-cookie bypass", async () => {
       originCalls += 1;
       return new Response("ok", { status: 200 });
     };
-    const res = await powHandler(
+    const res = await core1Handler(
       new Request("https://example.com/protected", {
         headers: {
           Accept: "application/json",
@@ -3962,6 +4188,676 @@ test("atomic recaptcha mode disables proof-cookie bypass", async () => {
     assert.equal(res.status, 403);
     assert.deepEqual(await res.json(), { code: "captcha_required" });
     assert.equal(originCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("split core1 enforces business gate for non-navigation unauthorized request", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const { core1Fetch, core2Fetch } = await buildCoreModules("config-secret");
+    const innerConfig = {
+      powcheck: true,
+      turncheck: false,
+      recaptchaEnabled: false,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 1,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 1,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 1,
+      POW_SAMPLE_K: 0,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+    const innerPayloadObj = {
+      v: 1,
+      id: 222,
+      c: innerConfig,
+      d: {
+        ipScope: "1.2.3.4/32",
+        country: "any",
+        asn: "any",
+        tlsFingerprint: "any",
+      },
+      s: {
+        nav: {},
+        bypass: { bypass: false },
+        bind: { ok: true, code: "", canonicalPath: "/protected" },
+        atomic: {
+          captchaToken: "",
+          ticketB64: "",
+          consumeToken: "",
+          fromCookie: false,
+          cookieName: "__Secure-pow_a",
+        },
+      },
+    };
+
+    globalThis.fetch = async (request) => {
+      if (request.headers.has("X-Pow-Transit")) {
+        return core2Fetch(request);
+      }
+      return new Response("origin should not be reached", { status: 599 });
+    };
+
+    const splitHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "GET",
+      pathname: "/protected",
+      kind: "biz",
+      apiPrefix: "/__pow",
+    });
+    const res = await core1Fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: splitHeaders,
+      })
+    );
+
+    assert.equal(res.status, 403);
+    assert.deepEqual(await res.json(), { code: "pow_required" });
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("split core1 enforces navigation unauthorized challenge html", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const { core1Fetch, core2Fetch } = await buildCoreModules("config-secret");
+    const innerConfig = {
+      powcheck: true,
+      turncheck: false,
+      recaptchaEnabled: false,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 1,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 1,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 1,
+      POW_SAMPLE_K: 0,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+    const innerPayloadObj = {
+      v: 1,
+      id: 223,
+      c: innerConfig,
+      d: {
+        ipScope: "1.2.3.4/32",
+        country: "any",
+        asn: "any",
+        tlsFingerprint: "any",
+      },
+      s: {
+        nav: {},
+        bypass: { bypass: false },
+        bind: { ok: true, code: "", canonicalPath: "/protected" },
+        atomic: {
+          captchaToken: "",
+          ticketB64: "",
+          consumeToken: "",
+          fromCookie: false,
+          cookieName: "__Secure-pow_a",
+        },
+      },
+    };
+
+    globalThis.fetch = async (request) => {
+      if (request.headers.has("X-Pow-Transit")) {
+        return core2Fetch(request);
+      }
+      return new Response("origin should not be reached", { status: 599 });
+    };
+
+    const splitHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "GET",
+      pathname: "/protected",
+      kind: "biz",
+      apiPrefix: "/__pow",
+    });
+    splitHeaders.Accept = "text/html";
+    const res = await core1Fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: splitHeaders,
+      })
+    );
+
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("Content-Type"), "text/html");
+    const html = await res.text();
+    assert.match(html, /<body/u);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("split core1 forwards valid proof path to origin", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const { core1Fetch, core2Fetch } = await buildCoreModules("config-secret");
+    const innerConfig = {
+      powcheck: false,
+      turncheck: true,
+      recaptchaEnabled: false,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 1,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 1,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 1,
+      POW_SAMPLE_K: 0,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+    const innerPayloadObj = {
+      v: 1,
+      id: 225,
+      c: innerConfig,
+      d: {
+        ipScope: "1.2.3.4/32",
+        country: "any",
+        asn: "any",
+        tlsFingerprint: "any",
+      },
+      s: {
+        nav: {},
+        bypass: { bypass: false },
+        bind: { ok: true, code: "", canonicalPath: "/protected" },
+        atomic: {
+          captchaToken: "",
+          ticketB64: "",
+          consumeToken: "",
+          fromCookie: false,
+          cookieName: "__Secure-pow_a",
+        },
+      },
+    };
+
+    const originRequests = [];
+    let turnstileCdata = "";
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (request.headers.has("X-Pow-Transit")) {
+        return core2Fetch(request);
+      }
+      if (request.url === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        return new Response(JSON.stringify({ success: true, cdata: turnstileCdata }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      originRequests.push(request);
+      return new Response("origin-ok", { status: 200 });
+    };
+
+    const pageHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "GET",
+      pathname: "/protected",
+      kind: "biz",
+      apiPrefix: "/__pow",
+    });
+    pageHeaders.Accept = "text/html";
+    const pageRes = await core1Fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: pageHeaders,
+      })
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args, "challenge args present");
+    const ticket = decodeTicket(args.ticketB64);
+    assert.ok(ticket, "ticket decodes");
+    turnstileCdata = ticket.mac;
+
+    const capHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "POST",
+      pathname: "/__pow/cap",
+      kind: "api",
+      apiPrefix: "/__pow",
+    });
+    capHeaders["Content-Type"] = "application/json";
+    const capRes = await core1Fetch(
+      new Request("https://example.com/__pow/cap", {
+        method: "POST",
+        headers: capHeaders,
+        body: JSON.stringify({
+          ticketB64: args.ticketB64,
+          pathHash: args.pathHash,
+          captchaToken: JSON.stringify({ turnstile: "split-proof-turn-token-1234567890" }),
+        }),
+      })
+    );
+    assert.equal(capRes.status, 200);
+    const proofCookie = (capRes.headers.get("Set-Cookie") || "").split(";")[0];
+    assert.ok(proofCookie, "proof cookie issued");
+
+    originRequests.length = 0;
+    const protectedHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "GET",
+      pathname: "/protected",
+      kind: "biz",
+      apiPrefix: "/__pow",
+    });
+    protectedHeaders.Accept = "application/json";
+    protectedHeaders.Cookie = proofCookie;
+    const protectedRes = await core1Fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: protectedHeaders,
+      })
+    );
+
+    assert.equal(protectedRes.status, 200);
+    assert.equal(await protectedRes.text(), "origin-ok");
+    assert.equal(originRequests.length, 1);
+    assert.equal(new URL(originRequests[0].url).pathname, "/protected");
+    for (const key of originRequests[0].headers.keys()) {
+      const normalized = key.toLowerCase();
+      assert.equal(normalized.startsWith("x-pow-inner"), false, `origin strips ${key}`);
+      assert.equal(normalized.startsWith("x-pow-transit"), false, `origin strips ${key}`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("split core1 preserves stale/cheat hints on api deny", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  try {
+    const { core1Fetch, core2Fetch } = await buildCoreModules("config-secret");
+    const innerConfig = {
+      powcheck: true,
+      turncheck: true,
+      recaptchaEnabled: false,
+      bindPathMode: "none",
+      bindPathQueryName: "path",
+      bindPathHeaderName: "",
+      stripBindPathHeader: false,
+      POW_VERSION: 3,
+      POW_API_PREFIX: "/__pow",
+      POW_DIFFICULTY_BASE: 1,
+      POW_DIFFICULTY_COEFF: 1,
+      POW_MIN_STEPS: 1,
+      POW_MAX_STEPS: 1,
+      POW_HASHCASH_BITS: 0,
+      POW_SEGMENT_LEN: 1,
+      POW_SAMPLE_K: 0,
+      POW_SPINE_K: 0,
+      POW_CHAL_ROUNDS: 1,
+      POW_OPEN_BATCH: 1,
+      POW_FORCE_EDGE_1: true,
+      POW_FORCE_EDGE_LAST: true,
+      POW_COMMIT_TTL_SEC: 120,
+      POW_TICKET_TTL_SEC: 600,
+      PROOF_TTL_SEC: 600,
+      PROOF_RENEW_ENABLE: false,
+      PROOF_RENEW_MAX: 2,
+      PROOF_RENEW_WINDOW_SEC: 90,
+      PROOF_RENEW_MIN_SEC: 30,
+      ATOMIC_CONSUME: false,
+      ATOMIC_TURN_QUERY: "__ts",
+      ATOMIC_TICKET_QUERY: "__tt",
+      ATOMIC_CONSUME_QUERY: "__ct",
+      ATOMIC_TURN_HEADER: "x-turnstile",
+      ATOMIC_TICKET_HEADER: "x-ticket",
+      ATOMIC_CONSUME_HEADER: "x-consume",
+      ATOMIC_COOKIE_NAME: "__Secure-pow_a",
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+      INNER_AUTH_QUERY_NAME: "",
+      INNER_AUTH_QUERY_VALUE: "",
+      INNER_AUTH_HEADER_NAME: "",
+      INNER_AUTH_HEADER_VALUE: "",
+      stripInnerAuthQuery: false,
+      stripInnerAuthHeader: false,
+      POW_BIND_PATH: true,
+      POW_BIND_IPRANGE: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
+      POW_TOKEN: "pow-secret",
+      TURNSTILE_SITEKEY: "sitekey",
+      TURNSTILE_SECRET: "turn-secret",
+      POW_COMMIT_COOKIE: "__Host-pow_commit",
+      POW_ESM_URL: "https://example.com/esm",
+      POW_GLUE_URL: "https://example.com/glue",
+    };
+    const innerPayloadObj = {
+      v: 1,
+      id: 224,
+      c: innerConfig,
+      d: {
+        ipScope: "1.2.3.4/32",
+        country: "any",
+        asn: "any",
+        tlsFingerprint: "any",
+      },
+      s: {
+        nav: {},
+        bypass: { bypass: false },
+        bind: { ok: true, code: "", canonicalPath: "/protected" },
+        atomic: {
+          captchaToken: "",
+          ticketB64: "",
+          consumeToken: "",
+          fromCookie: false,
+          cookieName: "__Secure-pow_a",
+        },
+      },
+    };
+
+    globalThis.fetch = async (request) => {
+      if (request.headers.has("X-Pow-Transit")) {
+        return core2Fetch(request);
+      }
+      if (String(request.url) === "https://challenges.cloudflare.com/turnstile/v0/siteverify") {
+        return new Response(JSON.stringify({ success: false }), { status: 200 });
+      }
+      return new Response("origin should not be reached", { status: 599 });
+    };
+
+    const pageHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "GET",
+      pathname: "/protected",
+      kind: "biz",
+      apiPrefix: "/__pow",
+    });
+    pageHeaders.Accept = "text/html";
+    const pageRes = await core1Fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: pageHeaders,
+      })
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args, "challenge args present");
+
+    const commitHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "POST",
+      pathname: "/__pow/commit",
+      kind: "api",
+      apiPrefix: "/__pow",
+    });
+    commitHeaders["Content-Type"] = "application/json";
+    const commitRes = await core2Fetch(
+      new Request("https://example.com/__pow/commit", {
+        method: "POST",
+        headers: commitHeaders,
+        body: JSON.stringify({
+          ticketB64: args.ticketB64,
+          rootB64: base64Url(crypto.randomBytes(32)),
+          pathHash: args.pathHash,
+          nonce: base64Url(crypto.randomBytes(16)),
+          captchaToken: JSON.stringify({ turnstile: "split-turn-token-1234567890" }),
+        }),
+      })
+    );
+    assert.equal(commitRes.status, 200);
+    const commitCookie = (commitRes.headers.get("Set-Cookie") || "").split(";")[0];
+    assert.ok(commitCookie, "commit cookie issued");
+
+    const challengeHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "POST",
+      pathname: "/__pow/challenge",
+      kind: "api",
+      apiPrefix: "/__pow",
+    });
+    challengeHeaders["Content-Type"] = "application/json";
+    challengeHeaders.Cookie = commitCookie;
+    const challengeRes = await core2Fetch(
+      new Request("https://example.com/__pow/challenge", {
+        method: "POST",
+        headers: challengeHeaders,
+        body: JSON.stringify({}),
+      })
+    );
+    assert.equal(challengeRes.status, 200);
+    const challengeBody = await challengeRes.json();
+
+    const badOpenHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "POST",
+      pathname: "/__pow/open",
+      kind: "api",
+      apiPrefix: "/__pow",
+    });
+    badOpenHeaders["Content-Type"] = "application/json";
+    badOpenHeaders.Cookie = commitCookie;
+    const badOpenRes = await core1Fetch(
+      new Request("https://example.com/__pow/open", {
+        method: "POST",
+        headers: badOpenHeaders,
+        body: JSON.stringify({
+          cursor: challengeBody.cursor,
+          token: challengeBody.token,
+          captchaToken: JSON.stringify({ turnstile: "split-turn-token-1234567890" }),
+          opens: [
+            {
+              i: 1,
+              page: base64Url(crypto.randomBytes(64)),
+              p0: base64Url(crypto.randomBytes(64)),
+              p1: base64Url(crypto.randomBytes(64)),
+              p2: base64Url(crypto.randomBytes(64)),
+              proof: {
+                page: [],
+                p0: [],
+                p1: [],
+                p2: [],
+              },
+            },
+          ],
+        }),
+      })
+    );
+    assert.equal(badOpenRes.status, 403);
+    assert.equal(badOpenRes.headers.get("x-pow-h"), "cheat");
+
+    const staleCommitCookie = (() => {
+      const [cookieName, cookieValueRaw = ""] = commitCookie.split("=");
+      const decodedValue = decodeURIComponent(cookieValueRaw);
+      const parts = decodedValue.split(".");
+      assert.equal(parts.length, 8);
+      parts[6] = String(Math.floor(Date.now() / 1000) - 10);
+      return `${cookieName}=${encodeURIComponent(parts.join("."))}`;
+    })();
+
+    const staleOpenHeaders = buildSplitApiHeaders({
+      payloadObj: innerPayloadObj,
+      secret: "config-secret",
+      method: "POST",
+      pathname: "/__pow/open",
+      kind: "api",
+      apiPrefix: "/__pow",
+    });
+    staleOpenHeaders["Content-Type"] = "application/json";
+    staleOpenHeaders.Cookie = staleCommitCookie;
+    const staleOpenRes = await core1Fetch(
+      new Request("https://example.com/__pow/open", {
+        method: "POST",
+        headers: staleOpenHeaders,
+        body: JSON.stringify({
+          cursor: challengeBody.cursor,
+          token: challengeBody.token,
+          captchaToken: JSON.stringify({ turnstile: "split-turn-token-1234567890" }),
+          opens: [
+            {
+              i: 1,
+              page: base64Url(crypto.randomBytes(64)),
+              p0: base64Url(crypto.randomBytes(64)),
+              p1: base64Url(crypto.randomBytes(64)),
+              p2: base64Url(crypto.randomBytes(64)),
+              proof: {
+                page: [],
+                p0: [],
+                p1: [],
+                p2: [],
+              },
+            },
+          ],
+        }),
+      })
+    );
+    assert.equal(staleOpenRes.status, 403);
+    assert.equal(staleOpenRes.headers.get("x-pow-h"), "stale");
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();

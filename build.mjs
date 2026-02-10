@@ -9,12 +9,15 @@ import { buildCompiledConfig } from "./lib/build-config.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const powEntry = resolve(__dirname, "pow.js");
+const powCore1Entry = resolve(__dirname, "pow-core-1.js");
+const powCore2Entry = resolve(__dirname, "pow-core-2.js");
 const powConfigEntry = resolve(__dirname, "pow-config.js");
 const templatePath = resolve(__dirname, "template.html");
 const outdir = resolve(__dirname, "dist");
-const powOutfile = resolve(outdir, "pow_snippet.js");
+const powLegacyOutfile = resolve(outdir, "pow_snippet.js");
 const powConfigOutfile = resolve(outdir, "pow_config_snippet.js");
+const powCore1Outfile = resolve(outdir, "pow_core1_snippet.js");
+const powCore2Outfile = resolve(outdir, "pow_core2_snippet.js");
 
 
 console.log("Reading HTML template...");
@@ -60,8 +63,10 @@ console.log(
 const compiledConfig = await buildCompiledConfig(powConfigEntry);
 
 await mkdir(outdir, { recursive: true });
-await rm(powOutfile, { force: true });
+await rm(powLegacyOutfile, { force: true });
 await rm(powConfigOutfile, { force: true });
+await rm(powCore1Outfile, { force: true });
+await rm(powCore2Outfile, { force: true });
 
 const buildSnippet = async ({ entryPoints, outfile, define }) => {
   await build({
@@ -119,12 +124,20 @@ await buildSnippet({
   },
 });
 await buildSnippet({
-  entryPoints: [powEntry],
-  outfile: powOutfile,
+  entryPoints: [powCore1Entry],
+  outfile: powCore1Outfile,
+  define: {
+    __HTML_TEMPLATE__: JSON.stringify(minifiedHtml),
+  },
+});
+await buildSnippet({
+  entryPoints: [powCore2Entry],
+  outfile: powCore2Outfile,
   define: {
     __HTML_TEMPLATE__: JSON.stringify(minifiedHtml),
   },
 });
 
 await minifyAndCheck(powConfigOutfile);
-await minifyAndCheck(powOutfile);
+await minifyAndCheck(powCore1Outfile);
+await minifyAndCheck(powCore2Outfile);

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -175,6 +175,264 @@ const buildConfigModule = async (secret = "config-secret", options = {}) => {
   await writeFile(tmpPath, withSecret);
   return tmpPath;
 };
+
+const readOptionalFile = async (filePath) => {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+};
+
+const buildCoreModules = async (secret = "config-secret") => {
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readOptionalFile(join(repoRoot, "lib", "pow", "inner-auth.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "internal-headers.js")),
+    readOptionalFile(join(repoRoot, "lib", "pow", "api-engine.js")),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
+
+  const tmpDir = await mkdtemp(join(tmpdir(), "pow-core-inner-test-"));
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+  if (innerAuthSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource));
+  }
+  if (internalHeadersSource !== null) {
+    writes.push(
+      writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource)
+    );
+  }
+  if (apiEngineSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource));
+  }
+  await Promise.all(writes);
+
+  const nonce = `${Date.now()}-${Math.random()}`;
+  const [core1Module, core2Module] = await Promise.all([
+    import(`${pathToFileURL(join(tmpDir, "pow-core-1.js")).href}?v=${nonce}`),
+    import(`${pathToFileURL(join(tmpDir, "pow-core-2.js")).href}?v=${nonce}`),
+  ]);
+  return {
+    core1: core1Module.default,
+    core2: core2Module.default,
+  };
+};
+
+const normalizeApiPrefix = (value) => {
+  if (typeof value !== "string") return "/__pow";
+  const trimmed = value.trim();
+  if (!trimmed) return "/__pow";
+  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const normalized = withSlash.replace(/\/+$/u, "");
+  return normalized || "/__pow";
+};
+
+const makeTransitHeaders = ({
+  secret,
+  exp,
+  kind,
+  method,
+  pathname,
+  apiPrefix = "/__pow",
+}) => {
+  const normalizedMethod = typeof method === "string" && method ? method.toUpperCase() : "GET";
+  const normalizedPath =
+    typeof pathname === "string" && pathname ? (pathname.startsWith("/") ? pathname : `/${pathname}`) : "/";
+  const normalizedApiPrefix = normalizeApiPrefix(apiPrefix);
+  const input = `v1|${exp}|${kind}|${normalizedMethod}|${normalizedPath}|${normalizedApiPrefix}`;
+  const mac = hmacSha256Base64Url(secret, input);
+  const headers = new Headers();
+  headers.set("X-Pow-Transit", kind);
+  headers.set("X-Pow-Transit-Mac", mac);
+  headers.set("X-Pow-Transit-Expire", String(exp));
+  headers.set("X-Pow-Transit-Api-Prefix", normalizedApiPrefix);
+  return headers;
+};
+
+const buildInnerPayloadForCore = ({ apiPrefix = "/__pow", extraConfig = {} } = {}) => ({
+  v: 1,
+  id: 0,
+  c: { POW_API_PREFIX: apiPrefix, ...extraConfig },
+  d: {
+    ipScope: "1.2.3.4/32",
+    country: "any",
+    asn: "any",
+    tlsFingerprint: "any",
+  },
+  s: {
+    nav: {},
+    bypass: { bypass: false },
+    bind: { ok: true, code: "", canonicalPath: "/protected" },
+    atomic: {
+      captchaToken: "",
+      ticketB64: "",
+      consumeToken: "",
+      fromCookie: false,
+      cookieName: "__Secure-pow_a",
+    },
+  },
+});
+
+const makeInnerHeaders = ({
+  secret,
+  chunked = false,
+  exp = Math.floor(Date.now() / 1000) + 3,
+  apiPrefix = "/__pow",
+  payloadObj,
+}) => {
+  const encodedPayload = payloadObj || buildInnerPayloadForCore({ apiPrefix });
+  const payload = base64Url(Buffer.from(JSON.stringify(encodedPayload), "utf8"));
+  const mac = hmacSha256Base64Url(secret, `${payload}.${exp}`);
+  const headers = new Headers();
+  if (chunked) {
+    const midpoint = Math.floor(payload.length / 2);
+    const part0 = payload.slice(0, midpoint);
+    const part1 = payload.slice(midpoint);
+    headers.set("X-Pow-Inner-Count", "2");
+    headers.set("X-Pow-Inner-0", part0);
+    headers.set("X-Pow-Inner-1", part1);
+  } else {
+    headers.set("X-Pow-Inner", payload);
+  }
+  headers.set("X-Pow-Inner-Mac", mac);
+  headers.set("X-Pow-Inner-Expire", String(exp));
+  return headers;
+};
+
+test("core-1 rejects missing or invalid inner payload", async () => {
+  const restoreGlobals = ensureGlobals();
+  const { core1 } = await buildCoreModules("config-secret");
+  const originalFetch = globalThis.fetch;
+  let forwardedCalls = 0;
+  try {
+    globalThis.fetch = async () => {
+      forwardedCalls += 1;
+      return new Response("ok", { status: 200 });
+    };
+
+    const missing = await core1.fetch(new Request("https://example.com/protected"));
+    assert.equal(missing.status, 500);
+    assert.equal(forwardedCalls, 0);
+
+    const invalidHeaders = makeInnerHeaders({ secret: "config-secret" });
+    invalidHeaders.set("X-Pow-Inner-Mac", "tampered");
+    const invalid = await core1.fetch(
+      new Request("https://example.com/protected", { headers: invalidHeaders })
+    );
+    assert.equal(invalid.status, 500);
+    assert.equal(forwardedCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("core-1 rejects oversized direct inner payload header", async () => {
+  const restoreGlobals = ensureGlobals();
+  const { core1 } = await buildCoreModules("config-secret");
+  const originalFetch = globalThis.fetch;
+  let forwardedCalls = 0;
+  try {
+    globalThis.fetch = async () => {
+      forwardedCalls += 1;
+      return new Response("ok", { status: 200 });
+    };
+
+    const hugePayload = buildInnerPayloadForCore({
+      extraConfig: {
+        oversized: "x".repeat(130000),
+      },
+    });
+    const headers = makeInnerHeaders({
+      secret: "config-secret",
+      payloadObj: hugePayload,
+    });
+    const { payload } = readInnerPayload(headers);
+    assert.ok(payload.length > 128 * 1024, "direct inner payload exceeds parser max");
+
+    const res = await core1.fetch(new Request("https://example.com/protected", { headers }));
+    assert.equal(res.status, 500);
+    assert.equal(forwardedCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("core-2 strips x-pow-inner* and x-pow-transit* before origin fetch", async () => {
+  const restoreGlobals = ensureGlobals();
+  const { core2 } = await buildCoreModules("config-secret");
+  const originalFetch = globalThis.fetch;
+  let forwarded = null;
+  try {
+    globalThis.fetch = async (request) => {
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const method = "GET";
+    const pathname = "/protected";
+    const exp = Math.floor(Date.now() / 1000) + 3;
+    const headers = makeTransitHeaders({
+      secret: "config-secret",
+      exp,
+      kind: "biz",
+      method,
+      pathname,
+      apiPrefix: "/protected-api",
+    });
+    const innerHeaders = makeInnerHeaders({ secret: "config-secret", chunked: true });
+    for (const [key, value] of innerHeaders.entries()) {
+      headers.set(key, value);
+    }
+    headers.set("X-Pow-Transit-Extra", "spoofed");
+
+    const res = await core2.fetch(
+      new Request(`https://example.com${pathname}`, { method, headers })
+    );
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "origin request forwarded");
+    for (const key of forwarded.headers.keys()) {
+      const normalized = key.toLowerCase();
+      assert.equal(normalized.startsWith("x-pow-inner"), false, `${key} is stripped`);
+      assert.equal(normalized.startsWith("x-pow-transit"), false, `${key} is stripped`);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
 
 test("inner header signature helper matches node crypto", async () => {
   const restoreGlobals = ensureGlobals();

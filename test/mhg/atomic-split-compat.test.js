@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -61,15 +61,88 @@ const ensureGlobals = () => {
 const replaceConfigSecret = (source, secret) =>
   source.replace(/const CONFIG_SECRET = "[^"]*";/u, `const CONFIG_SECRET = "${secret}";`);
 
-const buildPowModule = async (secret = CONFIG_SECRET) => {
+const buildCore1Module = async (secret = CONFIG_SECRET) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const powSource = await readFile(join(repoRoot, "pow.js"), "utf8");
-  const template = await readFile(join(repoRoot, "template.html"), "utf8");
-  const injected = powSource.replace(/__HTML_TEMPLATE__/gu, JSON.stringify(template));
-  const withSecret = replaceConfigSecret(injected, secret);
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    businessGateSource,
+    templateSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "inner-auth.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "internal-headers.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "api-engine.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "business-gate.js"), "utf8"),
+    readFile(join(repoRoot, "template.html"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
   const tmpDir = await mkdtemp(join(tmpdir(), "pow-mhg-atomic-split-"));
-  const tmpPath = join(tmpDir, "pow.js");
-  await writeFile(tmpPath, withSecret);
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const businessGateInjected = businessGateSource.replace(
+    /__HTML_TEMPLATE__/gu,
+    JSON.stringify(templateSource)
+  );
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource),
+    writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource),
+    writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource),
+    writeFile(join(tmpDir, "lib", "pow", "business-gate.js"), businessGateInjected),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+
+  const harnessSource = `
+import core1 from "./pow-core-1.js";
+import core2 from "./pow-core-2.js";
+
+const toRequest = (input, init) =>
+  input instanceof Request ? input : new Request(input, init);
+
+const isTransitRequest = (request) =>
+  request.headers.has("X-Pow-Transit");
+
+export default {
+  async fetch(request, env, ctx) {
+    const upstreamFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const nextRequest = toRequest(input, init);
+      if (isTransitRequest(nextRequest)) {
+        return core2.fetch(nextRequest, env, ctx);
+      }
+      return upstreamFetch(input, init);
+    };
+    try {
+      return await core1.fetch(request, env, ctx);
+    } finally {
+      globalThis.fetch = upstreamFetch;
+    }
+  },
+};
+`;
+  const tmpPath = join(tmpDir, "core1-harness.js");
+  writes.push(writeFile(tmpPath, harnessSource));
+
+  await Promise.all(writes);
   return tmpPath;
 };
 
@@ -289,7 +362,7 @@ const buildMhgWitnessBundle = async ({ ticketB64, nonce }) => {
   return { rootB64: base64Url(tree.root), witnessByIndex };
 };
 
-const bootstrapConsume = async (powHandler) => {
+const bootstrapConsume = async (core1Handler) => {
   const captchaEnvelope = JSON.stringify({
     turnstile: "atomic-turn-token-1234567890",
     recaptcha_v3: "atomic-recaptcha-token-1234567890",
@@ -304,7 +377,7 @@ const bootstrapConsume = async (powHandler) => {
   };
   const payload = makeInnerPayload(emptyAtomic);
 
-  const pageRes = await powHandler(
+  const pageRes = await core1Handler(
     new Request("https://example.com/protected", {
       method: "GET",
       headers: {
@@ -322,7 +395,7 @@ const bootstrapConsume = async (powHandler) => {
 
   const nonce = base64Url(crypto.randomBytes(16));
   const witness = await buildMhgWitnessBundle({ ticketB64: args.ticketB64, nonce });
-  const commitRes = await powHandler(
+  const commitRes = await core1Handler(
     new Request("https://example.com/__pow/commit", {
       method: "POST",
       headers: {
@@ -345,7 +418,7 @@ const bootstrapConsume = async (powHandler) => {
   const commitCookie = (commitRes.headers.get("set-cookie") || "").split(";")[0];
   assert.ok(commitCookie);
 
-  const challengeRes = await powHandler(
+  const challengeRes = await core1Handler(
     new Request("https://example.com/__pow/challenge", {
       method: "POST",
       headers: {
@@ -363,7 +436,7 @@ const bootstrapConsume = async (powHandler) => {
 
   while (state.done === false) {
     const opens = state.indices.map((idx) => witness.witnessByIndex.get(idx));
-    const openRes = await powHandler(
+    const openRes = await core1Handler(
       new Request("https://example.com/__pow/open", {
         method: "POST",
         headers: {
@@ -403,26 +476,27 @@ const makeAtomicBusinessRequest = ({ consumeToken, captchaEnvelope }) =>
 
 test("dual-provider atomic preflight keeps split and subrequest budget (providers mode)", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
+  const core1Path = await buildCore1Module();
   const configPath = await buildConfigModule(CONFIG_SECRET, {
     turncheck: false,
     recaptchaEnabled: false,
     providers: "turnstile,recaptcha",
   });
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+  assert.equal(typeof core1Mod.default?.fetch, "function");
   const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Handler = core1Mod.default.fetch;
   const configHandler = configMod.default.fetch;
   const originalFetch = globalThis.fetch;
 
   try {
-    const seed = await bootstrapConsume(powHandler);
+    const seed = await bootstrapConsume(core1Handler);
     const counters = {
       turnstileVerifyInPowConfig: 0,
-      turnstileVerifyInPowJs: 0,
-      recaptchaVerifyInPowJs: 0,
+      turnstileVerifyInCore1: 0,
+      recaptchaVerifyInCore1: 0,
       powConfigSubrequests: 0,
-      powJsSubrequests: 0,
+      core1Subrequests: 0,
     };
 
     globalThis.fetch = async (input, init) => {
@@ -434,8 +508,8 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
         return new Response(JSON.stringify({ success: true, cdata: seed.ticket.mac }), { status: 200 });
       }
       if (reqUrl === RECAPTCHA_SITEVERIFY_URL) {
-        counters.recaptchaVerifyInPowJs += 1;
-        counters.powJsSubrequests += 1;
+        counters.recaptchaVerifyInCore1 += 1;
+        counters.core1Subrequests += 1;
         return new Response(
           JSON.stringify({
             success: true,
@@ -449,19 +523,19 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
       }
       if (req.headers.has("X-Pow-Inner") || req.headers.has("X-Pow-Inner-Count")) {
         counters.powConfigSubrequests += 1;
-        return powHandler(req, {}, {});
+        return core1Handler(req, {}, {});
       }
-      counters.powJsSubrequests += 1;
+      counters.core1Subrequests += 1;
       return new Response("ok", { status: 200 });
     };
 
     const result = await configHandler(makeAtomicBusinessRequest(seed), {}, {});
     assert.equal(result.status, 200);
     assert.equal(counters.turnstileVerifyInPowConfig, 1);
-    assert.equal(counters.turnstileVerifyInPowJs, 0);
-    assert.equal(counters.recaptchaVerifyInPowJs, 1);
+    assert.equal(counters.turnstileVerifyInCore1, 0);
+    assert.equal(counters.recaptchaVerifyInCore1, 1);
     assert.ok(counters.powConfigSubrequests <= 2);
-    assert.ok(counters.powJsSubrequests <= 2);
+    assert.ok(counters.core1Subrequests <= 2);
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();
@@ -470,16 +544,16 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
 
 test("expired consume returns stale on atomic business path", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
+  const core1Path = await buildCore1Module();
   const configPath = await buildConfigModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
   const configMod = await import(`${pathToFileURL(configPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Handler = core1Mod.default.fetch;
   const configHandler = configMod.default.fetch;
   const originalFetch = globalThis.fetch;
 
   try {
-    const seed = await bootstrapConsume(powHandler);
+    const seed = await bootstrapConsume(core1Handler);
     const parsed = parseConsume(seed.consumeToken);
     assert.ok(parsed);
     const expiredConsume = makeConsumeToken({
@@ -507,7 +581,7 @@ test("expired consume returns stale on atomic business path", async () => {
         );
       }
       if (req.headers.has("X-Pow-Inner") || req.headers.has("X-Pow-Inner-Count")) {
-        return powHandler(req, {}, {});
+        return core1Handler(req, {}, {});
       }
       return new Response("ok", { status: 200 });
     };
@@ -527,13 +601,13 @@ test("expired consume returns stale on atomic business path", async () => {
 
 test("atomic rejects missing preflight evidence", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Path = await buildCore1Module();
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+  const core1Handler = core1Mod.default.fetch;
   const originalFetch = globalThis.fetch;
 
   try {
-    const seed = await bootstrapConsume(powHandler);
+    const seed = await bootstrapConsume(core1Handler);
     globalThis.fetch = async () => new Response("ok", { status: 200 });
     const payload = makeInnerPayload({
       captchaToken: seed.captchaEnvelope,
@@ -544,7 +618,7 @@ test("atomic rejects missing preflight evidence", async () => {
       turnstilePreflight: null,
     });
 
-    const result = await powHandler(
+    const result = await core1Handler(
       new Request("https://example.com/protected", {
         method: "GET",
         headers: {
@@ -566,13 +640,13 @@ test("atomic rejects missing preflight evidence", async () => {
 
 test("atomic rejects preflight tokenTag mismatch", async () => {
   const restoreGlobals = ensureGlobals();
-  const powPath = await buildPowModule();
-  const powMod = await import(`${pathToFileURL(powPath).href}?v=${Date.now()}`);
-  const powHandler = powMod.default.fetch;
+  const core1Path = await buildCore1Module();
+  const core1Mod = await import(`${pathToFileURL(core1Path).href}?v=${Date.now()}`);
+  const core1Handler = core1Mod.default.fetch;
   const originalFetch = globalThis.fetch;
 
   try {
-    const seed = await bootstrapConsume(powHandler);
+    const seed = await bootstrapConsume(core1Handler);
     globalThis.fetch = async (input, init) => {
       const req = input instanceof Request ? input : new Request(input, init);
       if (String(req.url) === RECAPTCHA_SITEVERIFY_URL) {
@@ -605,7 +679,7 @@ test("atomic rejects preflight tokenTag mismatch", async () => {
       },
     });
 
-    const result = await powHandler(
+    const result = await core1Handler(
       new Request("https://example.com/protected", {
         method: "GET",
         headers: {

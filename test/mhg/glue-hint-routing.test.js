@@ -67,3 +67,10 @@ test("missing hint follows stale compatibility branch", async () => {
   assert.equal(out.action, "reload");
   assert.equal(out.bounded, true);
 });
+
+test("unknown hint hard-fails in glue routing", async () => {
+  const routeHintAction = await loadRouteHintAction();
+  const out = routeHintAction({ status: 403, hint: "weird" });
+  assert.equal(out.action, "hard_fail");
+  assert.equal(out.bounded, false);
+});

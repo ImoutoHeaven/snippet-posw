@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -204,6 +204,129 @@ const mutateCommitExpiry = (commitCookie, exp) => {
   return `${commitCookie.split("=")[0]}=${encodeURIComponent(parts.join("."))}`;
 };
 
+const readOptionalFile = async (filePath) => {
+  try {
+    return await readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+};
+
+const buildCore2Module = async (secret = CONFIG_SECRET) => {
+  const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
+  const [
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] =
+    await Promise.all([
+      readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+      readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+      readFile(join(repoRoot, "lib", "pow", "inner-auth.js"), "utf8"),
+      readFile(join(repoRoot, "lib", "pow", "internal-headers.js"), "utf8"),
+      readOptionalFile(join(repoRoot, "lib", "pow", "api-engine.js")),
+      readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+      readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+      readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+    ]);
+
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
+  const tmpDir = await mkdtemp(join(tmpdir(), "pow-mhg-core2-ccr-test-"));
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource),
+    writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+  if (apiEngineSource !== null) {
+    writes.push(writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource));
+  }
+  await Promise.all(writes);
+
+  const mod = await import(`${pathToFileURL(join(tmpDir, "pow-core-2.js")).href}?v=${Date.now()}`);
+  return mod.default.fetch;
+};
+
+const normalizeApiPrefix = (value) => {
+  if (typeof value !== "string") return "/__pow";
+  const trimmed = value.trim();
+  if (!trimmed) return "/__pow";
+  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const normalized = withSlash.replace(/\/+$/u, "");
+  return normalized || "/__pow";
+};
+
+const makeTransitHeaders = ({ secret, exp, kind, method, pathname, apiPrefix }) => {
+  const normalizedMethod = typeof method === "string" && method ? method.toUpperCase() : "GET";
+  const normalizedPath =
+    typeof pathname === "string" && pathname
+      ? pathname.startsWith("/")
+        ? pathname
+        : `/${pathname}`
+      : "/";
+  const normalizedApiPrefix = normalizeApiPrefix(apiPrefix);
+  const input = `v1|${exp}|${kind}|${normalizedMethod}|${normalizedPath}|${normalizedApiPrefix}`;
+  const mac = base64Url(crypto.createHmac("sha256", secret).update(input).digest());
+  return {
+    "X-Pow-Transit": kind,
+    "X-Pow-Transit-Mac": mac,
+    "X-Pow-Transit-Expire": String(exp),
+    "X-Pow-Transit-Api-Prefix": normalizedApiPrefix,
+  };
+};
+
+const withSplitApiHeaders = ({ payload, method, pathname }) => ({
+  ...makeInnerHeaders(payload),
+  ...makeTransitHeaders({
+    secret: CONFIG_SECRET,
+    exp: Math.floor(Date.now() / 1000) + 3,
+    kind: "api",
+    method,
+    pathname,
+    apiPrefix: payload.c?.POW_API_PREFIX || "/__pow",
+  }),
+});
+
+const makeTicketB64 = ({ powSecret, payload, pathHash, host = "example.com" }) => {
+  const ticket = {
+    v: payload.c.POW_VERSION,
+    e: Math.floor(Date.now() / 1000) + 300,
+    L: 8,
+    r: base64Url(crypto.randomBytes(16)),
+    cfgId: payload.id,
+    mac: "",
+  };
+  const bindPath = payload.c.POW_BIND_PATH !== false ? pathHash : "any";
+  const bindIp = payload.c.POW_BIND_IPRANGE !== false ? payload.d.ipScope : "any";
+  const bindCountry = payload.c.POW_BIND_COUNTRY === true ? payload.d.country : "any";
+  const bindAsn = payload.c.POW_BIND_ASN === true ? payload.d.asn : "any";
+  const bindTls = payload.c.POW_BIND_TLS === true ? payload.d.tlsFingerprint : "any";
+  const binding = `${ticket.v}|${ticket.e}|${ticket.L}|${ticket.r}|${ticket.cfgId}|${host.toLowerCase()}|${bindPath}|${bindIp}|${bindCountry}|${bindAsn}|${bindTls}`;
+  ticket.mac = base64Url(crypto.createHmac("sha256", powSecret).update(binding).digest());
+  return base64Url(
+    Buffer.from(
+      `${ticket.v}.${ticket.e}.${ticket.L}.${ticket.r}.${ticket.cfgId}.${ticket.mac}`,
+      "utf8",
+    ),
+  );
+};
+
+const sha256Base64Url = (value) =>
+  base64Url(crypto.createHash("sha256").update(String(value || "")).digest());
+
 const createWorkerRpc = () => {
   const worker = new Worker(workerAdapterUrl, { type: "module" });
   let rid = 0;
@@ -353,6 +476,73 @@ const runCcrBootstrap = async (handler) => {
     payload,
     args,
     commitCookie: commitCookie2,
+    challengeBody,
+    solveOpens,
+    disposeSolver: () => solver.dispose(),
+  };
+};
+
+const runCcrBootstrapSplit = async (handler) => {
+  const payload = makeInnerPayload();
+  const pathHash = sha256Base64Url("/protected");
+  const ticketB64 = makeTicketB64({
+    powSecret: payload.c.POW_TOKEN,
+    payload,
+    pathHash,
+  });
+  const ticket = parseTicket(ticketB64);
+  const solver = await createMhgSolver({
+    ticketB64,
+    steps: ticket.L,
+    hashcashBits: payload.c.POW_HASHCASH_BITS,
+    segmentLen: payload.c.POW_SEGMENT_LEN,
+  });
+  const commitResult = await solver.call("COMMIT");
+
+  const commitRes = await handler(
+    new Request("https://example.com/__pow/commit", {
+      method: "POST",
+      headers: {
+        ...withSplitApiHeaders({ payload, method: "POST", pathname: "/__pow/commit" }),
+        "Content-Type": "application/json",
+      },
+        body: JSON.stringify({
+        ticketB64,
+        rootB64: commitResult.rootB64,
+        pathHash,
+        nonce: commitResult.nonce,
+      }),
+    }),
+    {},
+    {},
+  );
+  assert.equal(commitRes.status, 200);
+  const commitCookie = (commitRes.headers.get("set-cookie") || "").split(";")[0];
+  assert.ok(commitCookie);
+
+  const challengeRes = await handler(
+    new Request("https://example.com/__pow/challenge", {
+      method: "POST",
+      headers: {
+        ...withSplitApiHeaders({ payload, method: "POST", pathname: "/__pow/challenge" }),
+        "Content-Type": "application/json",
+        Cookie: commitCookie,
+      },
+      body: JSON.stringify({}),
+    }),
+    {},
+    {},
+  );
+  assert.equal(challengeRes.status, 200);
+  const challengeBody = await challengeRes.json();
+  const solveOpens = async (indices) => {
+    const out = await solver.call("OPEN", { indices });
+    return out.opens;
+  };
+
+  return {
+    payload,
+    commitCookie,
     challengeBody,
     solveOpens,
     disposeSolver: () => solver.dispose(),
@@ -602,6 +792,52 @@ test("malformed open payload -> 400", async () => {
       {}
     );
     assert.equal(res.status, 400);
+  } finally {
+    if (bootstrap) bootstrap.disposeSolver();
+    restoreGlobals();
+  }
+});
+
+test("split core-2 ccr challenge/open return required fields and terminal state", async () => {
+  const restoreGlobals = ensureGlobals();
+  const core2Fetch = await buildCore2Module();
+  let bootstrap;
+  try {
+    bootstrap = await runCcrBootstrapSplit(core2Fetch);
+    const { payload, commitCookie, challengeBody, solveOpens } = bootstrap;
+
+    assert.equal(challengeBody.done, false);
+    assert.ok(Array.isArray(challengeBody.indices));
+    assert.ok(Array.isArray(challengeBody.segs));
+    assert.equal(challengeBody.indices.length, challengeBody.segs.length);
+    assert.equal(typeof challengeBody.token, "string");
+    assert.ok(Number.isInteger(challengeBody.cursor));
+
+    let state = challengeBody;
+    while (state.done === false) {
+      const opens = await solveOpens(state.indices);
+      const openRes = await core2Fetch(
+        new Request("https://example.com/__pow/open", {
+          method: "POST",
+          headers: {
+            ...withSplitApiHeaders({ payload, method: "POST", pathname: "/__pow/open" }),
+            "Content-Type": "application/json",
+            Cookie: commitCookie,
+          },
+          body: JSON.stringify({
+            cursor: state.cursor,
+            token: state.token,
+            opens,
+          }),
+        }),
+        {},
+        {},
+      );
+      assert.equal(openRes.status, 200);
+      state = await openRes.json();
+    }
+
+    assert.equal(state.done, true);
   } finally {
     if (bootstrap) bootstrap.disposeSolver();
     restoreGlobals();

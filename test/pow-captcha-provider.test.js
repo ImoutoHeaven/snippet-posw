@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -57,21 +57,106 @@ const ensureGlobals = () => {
 const replaceConfigSecret = (source, secret) =>
   source.replace(/const CONFIG_SECRET = "[^"]*";/u, `const CONFIG_SECRET = "${secret}";`);
 
-const buildPowModule = async (secret = "config-secret") => {
+const buildCore1Module = async (secret = "config-secret") => {
   const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-  const powSource = await readFile(join(repoRoot, "pow.js"), "utf8");
-  const template = await readFile(join(repoRoot, "template.html"), "utf8");
-  const injected = powSource.replace(/__HTML_TEMPLATE__/gu, JSON.stringify(template));
-  const withSecret = replaceConfigSecret(injected, secret);
+  const [
+    core1SourceRaw,
+    core2SourceRaw,
+    transitSource,
+    innerAuthSource,
+    internalHeadersSource,
+    apiEngineSource,
+    businessGateSource,
+    templateSource,
+    mhgGraphSource,
+    mhgMixSource,
+    mhgMerkleSource,
+  ] = await Promise.all([
+    readFile(join(repoRoot, "pow-core-1.js"), "utf8"),
+    readFile(join(repoRoot, "pow-core-2.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "transit-auth.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "inner-auth.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "internal-headers.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "api-engine.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "pow", "business-gate.js"), "utf8"),
+    readFile(join(repoRoot, "template.html"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "graph.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "mix-aes.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "mhg", "merkle.js"), "utf8"),
+  ]);
+
+  const core1Source = replaceConfigSecret(core1SourceRaw, secret);
+  const core2Source = replaceConfigSecret(core2SourceRaw, secret);
   const tmpDir = await mkdtemp(join(tmpdir(), "pow-provider-test-"));
+  await mkdir(join(tmpDir, "lib", "pow"), { recursive: true });
+  await mkdir(join(tmpDir, "lib", "mhg"), { recursive: true });
+  const businessGateInjected = businessGateSource
+    .replace(
+    /__HTML_TEMPLATE__/gu,
+    JSON.stringify(templateSource)
+    )
+    .concat(
+      "\nexport const __captchaTesting = { pickRecaptchaPair, captchaTagV1, verifyCaptchaForTicket };\n"
+    );
+  const writes = [
+    writeFile(join(tmpDir, "pow-core-1.js"), core1Source),
+    writeFile(join(tmpDir, "pow-core-2.js"), core2Source),
+    writeFile(join(tmpDir, "lib", "pow", "transit-auth.js"), transitSource),
+    writeFile(join(tmpDir, "lib", "pow", "inner-auth.js"), innerAuthSource),
+    writeFile(join(tmpDir, "lib", "pow", "internal-headers.js"), internalHeadersSource),
+    writeFile(join(tmpDir, "lib", "pow", "api-engine.js"), apiEngineSource),
+    writeFile(join(tmpDir, "lib", "pow", "business-gate.js"), businessGateInjected),
+    writeFile(join(tmpDir, "lib", "mhg", "graph.js"), mhgGraphSource),
+    writeFile(join(tmpDir, "lib", "mhg", "mix-aes.js"), mhgMixSource),
+    writeFile(join(tmpDir, "lib", "mhg", "merkle.js"), mhgMerkleSource),
+  ];
+
+  const harnessSource = `
+import core1 from "./pow-core-1.js";
+import core2 from "./pow-core-2.js";
+import * as businessGate from "./lib/pow/business-gate.js";
+
+const toRequest = (input, init) =>
+  input instanceof Request ? input : new Request(input, init);
+
+const isTransitRequest = (request) =>
+  request.headers.has("X-Pow-Transit");
+
+export default {
+  async fetch(request) {
+    const upstreamFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const nextRequest = toRequest(input, init);
+      if (isTransitRequest(nextRequest)) {
+        return core2.fetch(nextRequest);
+      }
+      return upstreamFetch(input, init);
+    };
+    try {
+      return await core1.fetch(request);
+    } finally {
+      globalThis.fetch = upstreamFetch;
+    }
+  },
+};
+
+export const __captchaTesting = {
+  pickRecaptchaPair: businessGate.__captchaTesting.pickRecaptchaPair,
+  captchaTagV1: businessGate.__captchaTesting.captchaTagV1,
+  verifyCaptchaForTicket: businessGate.__captchaTesting.verifyCaptchaForTicket,
+};
+`;
   const tmpPath = join(tmpDir, "pow-provider-test.js");
-  await writeFile(tmpPath, withSecret);
+  writes.push(writeFile(tmpPath, harnessSource));
+
+  await Promise.all(writes);
   return tmpPath;
 };
 
 const loadTestingApi = async () => {
-  const modulePath = await buildPowModule();
+  const modulePath = await buildCore1Module();
   const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  assert.equal(typeof mod.default?.fetch, "function");
   return mod.__captchaTesting;
 };
 
