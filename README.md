@@ -12,13 +12,15 @@ This project provides a self-contained L7 front gate that:
 ## Files
 
 - `pow-config.js`: policy frontload layer (rule match + bypass/bindPath/atomic derivation + signed inner snapshot).
-- `pow.js`: verification execution layer (PoW/unified-captcha state machine + ticket/cookie verification), consumes `inner.s` only.
+- `pow-core-1.js`: business-path gate execution layer (proof/challenge/atomic/captcha decisions), consumes `inner.s`, and forwards with transit.
+- `pow-core-2.js`: PoW API + verification engine (`/__pow/*` + validated business passthrough), validates transit before processing.
 - `glue.js`: browser-side UI + orchestration (loaded by the challenge page).
 - `esm/esm.js`: browser-side PoW solver (`computePoswCommit`).
 - `template.html`: minimal challenge page template injected into the build.
-- `build.mjs`: build script (esbuild + HTML minify) → `dist/pow_config_snippet.js` + `dist/pow_snippet.js`.
+- `build.mjs`: build script (esbuild + HTML minify) → `dist/pow_config_snippet.js` + `dist/pow_core1_snippet.js` + `dist/pow_core2_snippet.js`.
 - `dist/pow_config_snippet.js`: config snippet output.
-- `dist/pow_snippet.js`: gate snippet output.
+- `dist/pow_core1_snippet.js`: core-1 snippet output.
+- `dist/pow_core2_snippet.js`: core-2 snippet output.
 
 ## Configuration
 
@@ -34,7 +36,7 @@ Notes:
 
 - `POW_TOKEN` is required when `powcheck`, `turncheck`, or `recaptchaEnabled` is `true`.
 - `host` is required on every entry; legacy `pattern` is not supported.
-- Set `CONFIG_SECRET` to the same non-placeholder value in both `pow-config.js` and `pow.js`.
+- Set `CONFIG_SECRET` to the same non-placeholder value in `pow-config.js`, `pow-core-1.js`, and `pow-core-2.js`.
 - When `turncheck: true`, you must also set:
   - `TURNSTILE_SITEKEY`
   - `TURNSTILE_SECRET`
@@ -43,18 +45,20 @@ Notes:
   - `RECAPTCHA_MIN_SCORE` (v3 score threshold, default `0.5`)
   - Optional: `RECAPTCHA_ACTION` (expected v3 action label, default `"submit"`)
 - Rule matching is first-match-wins; put more specific rules first.
-- `pow.js` does not embed `DEFAULTS/CONFIG/COMPILED`; configuration is entirely supplied by `pow-config`.
-- Inner payload is `{ v, id, c, d, s }` with `v=1`; `s` is mandatory and carries frontloaded strategy (`nav/bypass/bind/atomic`). Missing `s` fails closed (`500`) with no legacy fallback.
+- `pow-core-1.js` and `pow-core-2.js` do not embed `DEFAULTS/CONFIG/COMPILED`; configuration is entirely supplied by `pow-config`.
+- Inner payload is `{ v, id, c, d, s }` with `v=1`; `s` is mandatory and carries frontloaded strategy (`nav/bypass/bind/atomic`). Missing `s` fails closed (`500`).
 - The inner header supports sharding via `X-Pow-Inner-Count` + `X-Pow-Inner-0..N-1`.
 - The inner header includes `X-Pow-Inner-Expire`; the MAC is computed over `payload + "." + exp`.
 - `POW_API_PREFIX` and `POW_COMMIT_COOKIE` are treated as global constants; `pow-config` supplies fixed defaults and per-entry overrides are ignored.
-- `pow.js` has no fallback: missing/invalid inner header, missing/out-of-window expire header, or failed signature returns `500`.
+- `pow-core-1.js` and `pow-core-2.js` are fail-closed: missing/invalid inner or transit headers, missing/out-of-window expire header, kind mismatch, or failed signature returns `500`.
 
 ## Architecture split
 
 - `pow-config` is the only policy decision point: it computes strategy and strips transient inputs before proxying.
-- `pow.js` is execution-only: it validates signed inner payload and runs PoW/unified-captcha verification paths.
-- Compatibility/migration branches are intentionally removed (`no compat`, `no migrate`, `no dead code`).
+- `pow-core-1` is business-path execution: it validates signed inner payload, enforces gate decisions, then issues short-lived transit for core-2.
+- `pow-core-2` is execution + API: it validates transit and enforces strict kind routing (`api` vs `biz`) before PoW API/origin handling.
+- Transit contract is fail-closed (`X-Pow-Transit`, `X-Pow-Transit-Mac`, `X-Pow-Transit-Expire`) and all internal headers are stripped before origin forwarding.
+- No-compat policy is strict: no compat, no migrate, no dead code branches.
 
 ## Config Reference
 
@@ -281,16 +285,16 @@ When `ATOMIC_CONSUME=true` and both providers are required on a business request
 
 - `pow-config` performs Turnstile preflight (`siteverify`) after atomic prechecks (`consume` integrity for combined mode, ticket MAC/binding for captcha-only mode).
 - `pow-config` signs `atomic.turnstilePreflight` into `inner.s` (`checked/ok/reason/ticketMac/tokenTag`).
-- `pow.js` requires valid preflight evidence in this path, fail-closes on missing/mismatched evidence, skips Turnstile network verify, and only runs reCAPTCHA verify before origin fetch.
+- `pow-core-2` requires valid preflight evidence in this path, fail-closes on missing/mismatched evidence, skips Turnstile network verify, and only runs reCAPTCHA verify before origin fetch.
 
 Subrequest matrix (API + business paths):
 
-| Flow | `pow-config` subrequests | `pow.js` subrequests | Total |
-|---|---:|---:|---:|
-| Non-atomic (`ATOMIC_CONSUME=false`) via `/__pow/cap` | `0` | `1` (single provider) / `2` (dual provider) | `1` / `2` |
-| Non-atomic combined final `/__pow/open` | `0` | `1` (single provider) / `2` (dual provider) | `1` / `2` |
-| Atomic, single-provider business request | `1` (forward to `pow.js`) | `2` (provider verify + origin fetch) | `3` |
-| Atomic, dual-provider business request | `2` (Turnstile preflight + forward) | `2` (reCAPTCHA verify + origin fetch) | `4` |
+| Flow | `pow-config` subrequests | `pow-core-1` subrequests | `pow-core-2` subrequests | Total |
+|---|---:|---:|---:|---:|
+| Non-atomic (`ATOMIC_CONSUME=false`) via `/__pow/cap` | `1` (forwarding the request to `pow-core-1`) | `1` (forwarding the request to `pow-core-2`) | `1` (single provider) / `2` (dual provider) | `3` / `4` |
+| Non-atomic combined final `/__pow/open` | `1` (forwarding the request to `pow-core-1`) | `1` (forwarding the request to `pow-core-2`) | `1` (single provider) / `2` (dual provider) | `3` / `4` |
+| Atomic, single-provider business request | `1` (forwarding the request to `pow-core-1`) | `1` (forwarding the request to `pow-core-2`) | `2` (provider verify + origin fetch) | `4` |
+| Atomic, dual-provider business request | `2` (Turnstile preflight + forwarding the request to `pow-core-1`) | `1` (forwarding the request to `pow-core-2`) | `2` (reCAPTCHA verify + origin fetch) | `5` |
 
 The key budget guardrail is per-snippet, not total chain calls: atomic dual-provider stays at `<=2` subrequests in each snippet scope.
 
@@ -443,13 +447,15 @@ npm install
 npm run build
 ```
 
-Output: `dist/pow_config_snippet.js` + `dist/pow_snippet.js` (each checks the Cloudflare Snippet 32KB limit).
+Output: `dist/pow_config_snippet.js` + `dist/pow_core1_snippet.js` + `dist/pow_core2_snippet.js` (each checks the Cloudflare Snippet 32KB hard limit).
+
+Budget policy: `32 KiB` is the hard limit for every snippet. `23 KiB` is a best-effort target for `pow_core1_snippet.js` and `pow_core2_snippet.js` (reported in build telemetry, not a hard-fail gate).
 
 ## Deploy
 
-1. Set `CONFIG_SECRET` in `pow-config.js` and `pow.js` (must match, not `replace-me`).
-2. Build and copy `dist/pow_config_snippet.js` and `dist/pow_snippet.js` into Cloudflare **Snippets**.
-3. Ensure `pow-config` runs **before** `pow.js`, and both run before any downstream auth/business snippets.
+1. Set `CONFIG_SECRET` in `pow-config.js`, `pow-core-1.js`, and `pow-core-2.js` (must match, not `replace-me`).
+2. Build and copy `dist/pow_config_snippet.js`, `dist/pow_core1_snippet.js`, and `dist/pow_core2_snippet.js` into Cloudflare **Snippets**.
+3. Ensure deploy order is `pow-config -> pow-core-1 -> pow-core-2`, and keep that chain before downstream auth/business snippets.
 4. Keep `/__pow/*` reachable from browsers during the challenge flow.
 
 ## Managed Challenge (optional)
@@ -463,39 +469,40 @@ The following table details the subrequest count and execution flow for all 16 p
 ### Core Concepts
 
 *   **Subrequest**: A `fetch()` network request initiated within a Snippet. Cloudflare's Pro plan limits this to 2 per Snippet execution.
-*   **`pow-config.js` Subrequests**: Always includes 1 for forwarding the request to `pow.js`. An additional `siteverify` request is made if Preflight is triggered.
-*   **`pow.js` Subrequests**: Includes 1 for forwarding the request to the origin if the request is allowed. Additional `siteverify` requests are made if required by the flow.
+*   **`pow-config` subrequests**: Always includes forwarding the request to `pow-core-1`. An additional `siteverify` request is made if preflight is triggered.
+*   **`pow-core-1` subrequests**: Includes forwarding the request to `pow-core-2` after inner validation and business-path decisions.
+*   **`pow-core-2` subrequests**: Includes forwarding to origin when the request is allowed; additional `siteverify` requests are made when required by flow.
 *   **Siteverify Timing**: The point at which a token is verified against the Turnstile or reCAPTCHA `siteverify` endpoint.
 *   **Preflight**: A special optimization that is only active when `Atomic` + `Turnstile` + `reCAPTCHA` are all enabled on a business path. It performs Turnstile verification in `pow-config.js` to ensure each Snippet's subrequest count does not exceed 2.
 
 ### Flow Analysis Table
 
-| # | PoW (P) | Atomic (A) | Turnstile (T) | reCAPTCHA (R) | Path Description | `pow-config` Subrequests | `pow.js` Subrequests | Siteverify Timing & Preflight | Core API Interaction |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **0** | **Off** | **Off** | **Off** | **Off** | **No Protection** | 1 (forward) | 1 (forward) | None | None, request passes through |
-| **1** | **Off** | **Off** | **Off** | **On** | **Non-Atomic, reCAPTCHA only** | 1 (forward) | 1 (in `/cap`) | `pow.js` in `/cap` (reCAPTCHA); No Preflight | `POST /__pow/cap` |
-| **2** | **Off** | **Off** | **On** | **Off** | **Non-Atomic, Turnstile only** | 1 (forward) | 1 (in `/cap`) | `pow.js` in `/cap` (Turnstile); No Preflight | `POST /__pow/cap` |
-| **3** | **Off** | **Off** | **On** | **On** | **Non-Atomic, Dual Captcha** | 1 (forward) | **2** (in `/cap`) | `pow.js` in `/cap` (Both); No Preflight | `POST /__pow/cap` |
-| **4** | **Off** | **On** | **Off** | **Off** | **Invalid Path** (Same as #0) | 1 (forward) | 1 (forward) | None | None, request passes through |
-| **5** | **Off** | **On** | **Off** | **On** | **Atomic, reCAPTCHA only** | 1 (forward) | **2** (on business path) | `pow.js` on business path (reCAPTCHA); No Preflight | Business request w/ token |
-| **6** | **Off** | **On** | **On** | **Off** | **Atomic, Turnstile only** | 1 (forward) | **2** (on business path) | `pow.js` on business path (Turnstile); No Preflight | Business request w/ token |
-| **7** | **Off** | **On** | **On** | **On** | **Atomic, Dual Captcha** | **2** (on business path) | **2** (on business path) | `pow-config` (Turnstile), `pow.js` (reCAPTCHA); **Preflight Enabled** | Business request w/ token |
-| **8** | **On** | **Off** | **Off** | **Off** | **PoW only** | 1 (forward) | 0 (in PoW API) | None | `/commit`, `/challenge`, `/open` |
-| **9** | **On** | **Off** | **Off** | **On** | **Non-Atomic, PoW + reCAPTCHA** | 1 (forward) | 1 (in `/open`) | `pow.js` in final `/open` (reCAPTCHA); No Preflight | PoW API |
-| **10** | **On** | **Off** | **On** | **Off** | **Non-Atomic, PoW + Turnstile** | 1 (forward) | 1 (in `/open`) | `pow.js` in final `/open` (Turnstile); No Preflight | PoW API |
-| **11** | **On** | **Off** | **On** | **On** | **Non-Atomic, PoW + Dual Captcha** | 1 (forward) | **2** (in `/open`) | `pow.js` in final `/open` (Both); No Preflight | PoW API |
-| **12** | **On** | **On** | **Off** | **Off** | **Invalid Path** (Same as #8) | 1 (forward) | 0 (in PoW API) | None | PoW API |
-| **13** | **On** | **On** | **Off** | **On** | **Atomic, PoW + reCAPTCHA** | 1 (forward) | **2** (on business path) | `pow.js` on business path (reCAPTCHA); No Preflight | PoW API + Business request |
-| **14** | **On** | **On** | **On** | **Off** | **Atomic, PoW + Turnstile** | 1 (forward) | **2** (on business path) | `pow.js` on business path (Turnstile); No Preflight | PoW API + Business request |
-| **15** | **On** | **On** | **On** | **On** | **Atomic, PoW + Dual Captcha** | **2** (on business path) | **2** (on business path) | `pow-config` (Turnstile), `pow.js` (reCAPTCHA); **Preflight Enabled** | PoW API + Business request |
+| # | PoW (P) | Atomic (A) | Turnstile (T) | reCAPTCHA (R) | Path Description | `pow-config` Subrequests | `pow-core-1` subrequests | `pow-core-2` subrequests | Siteverify Timing & Preflight | Core API Interaction |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **0** | **Off** | **Off** | **Off** | **Off** | **No Protection** | 1 (forward) | 1 (forward) | 1 (forward) | None | None, request passes through |
+| **1** | **Off** | **Off** | **Off** | **On** | **Non-Atomic, reCAPTCHA only** | 1 (forward) | 1 (forward) | 1 (in `/cap`) | `pow-core-2` in `/cap` (reCAPTCHA); No Preflight | `POST /__pow/cap` |
+| **2** | **Off** | **Off** | **On** | **Off** | **Non-Atomic, Turnstile only** | 1 (forward) | 1 (forward) | 1 (in `/cap`) | `pow-core-2` in `/cap` (Turnstile); No Preflight | `POST /__pow/cap` |
+| **3** | **Off** | **Off** | **On** | **On** | **Non-Atomic, Dual Captcha** | 1 (forward) | 1 (forward) | **2** (in `/cap`) | `pow-core-2` in `/cap` (Both); No Preflight | `POST /__pow/cap` |
+| **4** | **Off** | **On** | **Off** | **Off** | **Invalid Path** (Same as #0) | 1 (forward) | 1 (forward) | 1 (forward) | None | None, request passes through |
+| **5** | **Off** | **On** | **Off** | **On** | **Atomic, reCAPTCHA only** | 1 (forward) | 1 (forward) | **2** (on business path) | `pow-core-2` on business path (reCAPTCHA); No Preflight | Business request w/ token |
+| **6** | **Off** | **On** | **On** | **Off** | **Atomic, Turnstile only** | 1 (forward) | 1 (forward) | **2** (on business path) | `pow-core-2` on business path (Turnstile); No Preflight | Business request w/ token |
+| **7** | **Off** | **On** | **On** | **On** | **Atomic, Dual Captcha** | **2** (on business path) | 1 (forward) | **2** (on business path) | `pow-config` (Turnstile), `pow-core-2` (reCAPTCHA); **Preflight Enabled** | Business request w/ token |
+| **8** | **On** | **Off** | **Off** | **Off** | **PoW only** | 1 (forward) | 1 (forward) | 0 (in PoW API) | None | `/commit`, `/challenge`, `/open` |
+| **9** | **On** | **Off** | **Off** | **On** | **Non-Atomic, PoW + reCAPTCHA** | 1 (forward) | 1 (forward) | 1 (in `/open`) | `pow-core-2` in final `/open` (reCAPTCHA); No Preflight | PoW API |
+| **10** | **On** | **Off** | **On** | **Off** | **Non-Atomic, PoW + Turnstile** | 1 (forward) | 1 (forward) | 1 (in `/open`) | `pow-core-2` in final `/open` (Turnstile); No Preflight | PoW API |
+| **11** | **On** | **Off** | **On** | **On** | **Non-Atomic, PoW + Dual Captcha** | 1 (forward) | 1 (forward) | **2** (in `/open`) | `pow-core-2` in final `/open` (Both); No Preflight | PoW API |
+| **12** | **On** | **On** | **Off** | **Off** | **Invalid Path** (Same as #8) | 1 (forward) | 1 (forward) | 0 (in PoW API) | None | PoW API |
+| **13** | **On** | **On** | **Off** | **On** | **Atomic, PoW + reCAPTCHA** | 1 (forward) | 1 (forward) | **2** (on business path) | `pow-core-2` on business path (reCAPTCHA); No Preflight | PoW API + Business request |
+| **14** | **On** | **On** | **On** | **Off** | **Atomic, PoW + Turnstile** | 1 (forward) | 1 (forward) | **2** (on business path) | `pow-core-2` on business path (Turnstile); No Preflight | PoW API + Business request |
+| **15** | **On** | **On** | **On** | **On** | **Atomic, PoW + Dual Captcha** | **2** (on business path) | 1 (forward) | **2** (on business path) | `pow-config` (Turnstile), `pow-core-2` (reCAPTCHA); **Preflight Enabled** | PoW API + Business request |
 
 ### Key Path Analysis
 
 *   **Paths #0, #4, #12**: These are simplified or invalid configurations. In paths #4 and #12, `Atomic` mode is enabled but has no effect without a Captcha provider, so their behavior degenerates to paths #0 and #8, respectively.
-*   **Non-Atomic Captcha Paths (#1, #2, #3)**: `siteverify` occurs within `pow.js` when it handles the `/cap` API request. When two Captcha providers are required (path #3), `pow.js` makes 2 subrequests. This is valid because the `/cap` API endpoint only returns a cookie and does not forward to the origin, meaning its subrequest budget is self-contained.
-*   **Atomic Single-Captcha Paths (#5, #6, #13, #14)**: `siteverify` occurs within `pow.js` as it processes the final business request. Since `pow-config.js` has no preflight task, it only performs one forward (1 subrequest). `pow.js` must then perform one `siteverify` and one forward to the origin, for a total of 2 subrequests.
+*   **Non-Atomic Captcha Paths (#1, #2, #3)**: `siteverify` occurs within `pow-core-2` when it handles the `/cap` API request. When two captcha providers are required (path #3), `pow-core-2` makes 2 subrequests. This is valid because the `/cap` API endpoint only returns a cookie and does not forward to the origin.
+*   **Atomic Single-Captcha Paths (#5, #6, #13, #14)**: `siteverify` occurs within `pow-core-2` on the final business request. `pow-config` forwards to `pow-core-1`, `pow-core-1` forwards to `pow-core-2`, and `pow-core-2` performs provider verify + origin forward.
 *   **The Most Complex Paths (#7, #15)**: This is where the Preflight mechanism is critical.
-    1.  `pow-config.js` intercepts the business request, sees that dual atomic verification is needed, and **it initiates the `siteverify` for Turnstile** (subrequest 1). It then signs the result into the headers and forwards the request to `pow.js` (subrequest 2). **Total: 2 subrequests, within the Pro plan limit.**
-    2.  `pow.js` receives the request. It trusts the signed Turnstile preflight result from `pow-config.js` and **does not re-verify Turnstile**. It only needs to initiate the `siteverify` for reCAPTCHA (subrequest 1). After verification, it forwards the request to the origin (subrequest 2). **Total: 2 subrequests, also within the Pro plan limit.**
+    1.  `pow-config` intercepts the business request, sees that dual atomic verification is needed, initiates Turnstile `siteverify`, signs the result into `inner.s`, and forwards to `pow-core-1`.
+    2.  `pow-core-1` validates inner payload and transit-routes the request to `pow-core-2`; `pow-core-2` trusts signed preflight evidence, verifies reCAPTCHA, then forwards to origin.
 
 This table clearly illustrates how the system's architecture, through flow splitting and the Preflight mechanism, masterfully adheres to the strict subrequest limits of the Cloudflare Snippets platform across all 16 possible configurations.
