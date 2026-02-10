@@ -1606,7 +1606,7 @@ const runPowFlow = async (
       if (!segs) {
         throw new Error("Challenge Failed");
       }
-      const openRes = await rpc.call("OPEN", { indices });
+      const openRes = await rpc.call("OPEN", { indices, segs });
       const openBody = {
         sid: state.sid,
         cursor: state.cursor,

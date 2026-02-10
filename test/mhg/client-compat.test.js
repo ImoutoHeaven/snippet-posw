@@ -116,13 +116,17 @@ test("client still performs commit->challenge->open loop", async () => {
       }
       if (msg.type === "COMMIT") emit({ type: "COMMIT_OK", rid: msg.rid, rootB64: "AA", nonce: "nonce" });
       if (msg.type === "OPEN") {
-        const opens = (msg.indices || []).map((i) => ({
+        if (!Array.isArray(msg.segs) || msg.segs.length !== (msg.indices || []).length) {
+          emit({ type: "ERROR", rid: msg.rid, message: "missing segs" });
+          return;
+        }
+        const opens = (msg.indices || []).map((i, k) => ({
           i,
-          page: "AA",
-          p0: "AA",
-          p1: "AA",
-          p2: "AA",
-          proof: { page: [], p0: [], p1: [], p2: [] },
+          seg: msg.segs[k],
+          nodes: {
+            "0": { pageB64: "AA", proof: [] },
+            [String(i)]: { pageB64: "AA", proof: [] },
+          },
         }));
         emit({ type: "OPEN_OK", rid: msg.rid, opens });
       }
@@ -191,4 +195,7 @@ test("client still performs commit->challenge->open loop", async () => {
   assert.equal(initPayloads[0].ticketB64, b64u("1.2.3.4.5.6"));
   assert.equal(Object.hasOwn(openBodies[0], "spinePos"), false);
   assert.equal(Object.hasOwn(openBodies[1], "spinePos"), false);
+  assert.equal(openBodies[0].opens[0].seg, 2);
+  assert.equal(typeof openBodies[0].opens[0].nodes, "object");
+  assert.equal(Object.hasOwn(openBodies[0].opens[0], "page"), false);
 });

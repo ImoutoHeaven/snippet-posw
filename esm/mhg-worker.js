@@ -39,6 +39,11 @@ const u32be = (value) => {
   return out;
 };
 
+const readU32be = (bytes, offset) =>
+  (((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0);
+
+const bytesToHex = (bytes) => Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
 const MERKLE_LEAF_PREFIX = "MHG1-LEAF";
 const MERKLE_NODE_PREFIX = "MHG1-NODE";
 
@@ -63,18 +68,24 @@ const sha256 = async (...chunks) => {
 const leafHash = async (index, page) => sha256(encoder.encode(MERKLE_LEAF_PREFIX), u32be(index), page);
 const nodeHash = async (left, right) => sha256(encoder.encode(MERKLE_NODE_PREFIX), left, right);
 
-const deriveKey = async ({ graphSeed, nonce, index }) => {
-  const idx = u32be(index);
-  const keyMaterial = await sha256(encoder.encode("mhg:key"), graphSeed, nonce, idx);
-  const ivMaterial = await sha256(encoder.encode("mhg:iv"), graphSeed, nonce, idx);
-  const key = await crypto.subtle.importKey(
-    "raw",
-    keyMaterial.slice(0, 16),
-    { name: "AES-CBC" },
-    false,
-    ["encrypt"]
-  );
-  return { key, iv: ivMaterial.slice(0, 16) };
+const keyCache = new Map();
+
+const getImportedKey = async ({ graphSeed, nonce }) => {
+  const keyId = `${bytesToHex(graphSeed)}:${bytesToHex(nonce)}`;
+  let keyPromise = keyCache.get(keyId);
+  if (!keyPromise) {
+    keyPromise = (async () => {
+      const keyMaterial = await sha256(encoder.encode("MHG1-KEY"), graphSeed, nonce);
+      return crypto.subtle.importKey("raw", keyMaterial.slice(0, 32), { name: "AES-CBC" }, false, ["encrypt"]);
+    })();
+    keyCache.set(keyId, keyPromise);
+  }
+  try {
+    return await keyPromise;
+  } catch (error) {
+    keyCache.delete(keyId);
+    throw error;
+  }
 };
 
 const xor3 = (a, b, c) => {
@@ -83,73 +94,110 @@ const xor3 = (a, b, c) => {
   return out;
 };
 
-const mixPage = async ({ index, p0, p1, p2, graphSeed, nonce, pageBytes }) => {
-  const input = xor3(p0, p1, p2);
-  const { key, iv } = await deriveKey({ graphSeed, nonce, index });
+const rotlBytes = (buf, k) => {
+  const n = buf.length;
+  if (n === 0) return new Uint8Array(0);
+  const shift = ((k % n) + n) % n;
+  if (shift === 0) return buf.slice();
+  const out = new Uint8Array(n);
+  out.set(buf.subarray(shift), 0);
+  out.set(buf.subarray(0, shift), n - shift);
+  return out;
+};
+
+const aesCbcNoPadding = async ({ key, iv, input, pageBytes }) => {
   const encrypted = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-CBC", iv }, key, input));
   return encrypted.slice(0, pageBytes);
 };
 
-const expandGenesisSeed = async ({ graphSeed, nonce, pageBytes }) => {
-  const out = new Uint8Array(pageBytes);
-  let counter = 0;
-  let offset = 0;
-  while (offset < pageBytes) {
-    const block = await sha256(encoder.encode("mhg:genesis:block"), graphSeed, nonce, u32be(counter));
-    const take = Math.min(block.length, pageBytes - offset);
-    out.set(block.subarray(0, take), offset);
-    offset += take;
-    counter += 1;
+const makeGenesisPage = async ({ graphSeed, nonce, pageBytes }) => {
+  const key = await getImportedKey({ graphSeed, nonce });
+  const iv0 = (await sha256(encoder.encode("MHG1-IV0"), graphSeed, nonce)).slice(0, 16);
+  return aesCbcNoPadding({ key, iv: iv0, input: new Uint8Array(pageBytes), pageBytes });
+};
+
+const mixPage = async ({ i, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds = 2 }) => {
+  const key = await getImportedKey({ graphSeed, nonce });
+  let state = p0;
+  for (let round = 0; round < mixRounds; round += 1) {
+    const pa = await sha256(encoder.encode("MHG1-PA"), graphSeed, nonce, u32be(i));
+    const pb = await sha256(encoder.encode("MHG1-PB"), graphSeed, nonce, u32be(i));
+    const off1 = readU32be(pa, 0) % pageBytes;
+    const off2 = readU32be(pa, 4) % pageBytes;
+    const off3 = readU32be(pa, 8) % pageBytes;
+    const off4 = readU32be(pa, 12) % pageBytes;
+    const off5 = readU32be(pa, 16) % pageBytes;
+    const iv1 = pb.slice(0, 16);
+    const iv2 = pb.slice(16, 32);
+
+    const x0 = xor3(state, rotlBytes(p1, off1), rotlBytes(p2, off2));
+    const x1 = await aesCbcNoPadding({ key, iv: iv1, input: x0, pageBytes });
+    const x2 = xor3(x1, rotlBytes(p1, off3), rotlBytes(p2, off4));
+    const x3 = await aesCbcNoPadding({ key, iv: iv2, input: x2, pageBytes });
+    state = xor3(x3, x0, rotlBytes(x1, off5));
+  }
+  return state;
+};
+
+const draw32 = async ({ seed, label, i, ctr }) => {
+  const digest = await sha256(encoder.encode("MHG1-PRF"), seed, encoder.encode(label), u32be(i), u32be(ctr));
+  const view = new DataView(digest.buffer, digest.byteOffset, digest.byteLength);
+  return view.getUint32(0, false);
+};
+
+const uniformMod = async ({ seed, label, i, mod, ctr = 0 }) => {
+  const limit = Math.floor(0x1_0000_0000 / mod) * mod;
+  while (true) {
+    const n = await draw32({ seed, label, i, ctr });
+    ctr += 1;
+    if (n < limit) return { value: n % mod, ctr };
+  }
+};
+
+const pickDistinct = async ({ seed, label, i, count, maxExclusive, exclude = new Set() }) => {
+  const out = [];
+  const seen = new Set(exclude);
+  let ctr = 0;
+  while (out.length < count && seen.size < maxExclusive) {
+    const next = await uniformMod({ seed, label, i, mod: maxExclusive, ctr });
+    ctr = next.ctr;
+    if (seen.has(next.value)) continue;
+    seen.add(next.value);
+    out.push(next.value);
+  }
+  while (out.length < count) {
+    const next = await uniformMod({ seed, label, i, mod: maxExclusive, ctr });
+    ctr = next.ctr;
+    out.push(next.value);
   }
   return out;
 };
 
-const makeGenesisPage = async ({ graphSeed, nonce, pageBytes }) => {
-  const seedPage = await expandGenesisSeed({ graphSeed, nonce, pageBytes });
-  const zero = new Uint8Array(pageBytes);
-  return mixPage({ index: 0, p0: seedPage, p1: zero, p2: zero, graphSeed, nonce, pageBytes });
-};
-
-const initState = (seed, a = 0, b = 0) => {
-  let x = 0x9e3779b9 ^ (a >>> 0) ^ (b >>> 0);
-  for (let i = 0; i < seed.length; i += 1) {
-    x ^= (seed[i] + 0x9e3779b9 + ((x << 6) >>> 0) + (x >>> 2)) >>> 0;
-    x >>>= 0;
+const parentsOf = async (index, graphSeed) => {
+  if (index === 1) {
+    return { p0: 0, p1: 0, p2: 0 };
   }
-  if (x === 0) x = 0xa341316c;
-  return { x };
-};
-
-const draw32 = (state) => {
-  let x = state.x >>> 0;
-  x ^= (x << 13) >>> 0;
-  x ^= x >>> 17;
-  x ^= (x << 5) >>> 0;
-  state.x = x >>> 0;
-  return state.x;
-};
-
-const uniformMod = (state, mod) => {
-  const limit = Math.floor(0x1_0000_0000 / mod) * mod;
-  while (true) {
-    const n = draw32(state);
-    if (n < limit) return n % mod;
+  if (index === 2) {
+    return { p0: 1, p1: 0, p2: 0 };
   }
-};
-
-const parentsOf = (index, graphSeed) => {
   const p0 = index - 1;
-  const state = initState(graphSeed, index, 0x70617265);
-  const seen = new Set([p0]);
-  const picks = [];
-  while (picks.length < 2 && seen.size < index) {
-    const n = uniformMod(state, index);
-    if (seen.has(n)) continue;
-    seen.add(n);
-    picks.push(n);
-  }
-  while (picks.length < 2) picks.push(uniformMod(state, index));
-  return { p0, p1: picks[0], p2: picks[1] };
+  const [p1] = await pickDistinct({
+    seed: graphSeed,
+    label: "p1",
+    i: index,
+    count: 1,
+    maxExclusive: index,
+    exclude: new Set([p0]),
+  });
+  const [p2] = await pickDistinct({
+    seed: graphSeed,
+    label: "p2",
+    i: index,
+    count: 1,
+    maxExclusive: index,
+    exclude: new Set([p0, p1]),
+  });
+  return { p0, p1, p2 };
 };
 
 const buildMerkle = async (pages) => {
@@ -223,20 +271,38 @@ const leadingZeroBits = (bytes) => {
 
 const hashcashRootLast = async (root, lastPage) => sha256(encoder.encode("hashcash|v3|"), root, lastPage);
 
-const toOpenEntry = ({ idx, pages, levels, graphSeed }) => {
-  const p = parentsOf(idx, graphSeed);
+const clampSegmentLen = (value) => Math.max(1, Math.min(16, Math.floor(value)));
+
+const buildEqSet = (index, segmentLen) => {
+  const start = Math.max(1, index - segmentLen + 1);
+  const out = [];
+  for (let i = start; i <= index; i += 1) out.push(i);
+  return out;
+};
+
+const toOpenEntry = async ({ idx, seg, pages, levels, graphSeed }) => {
+  const segmentLen = clampSegmentLen(seg);
+  const eqSet = buildEqSet(idx, segmentLen);
+  const need = new Set();
+  for (const j of eqSet) {
+    const p = await parentsOf(j, graphSeed);
+    need.add(j);
+    need.add(p.p0);
+    need.add(p.p1);
+    need.add(p.p2);
+  }
+  const sortedNeed = Array.from(need).sort((a, b) => a - b);
+  const nodes = {};
+  for (const needIdx of sortedNeed) {
+    nodes[String(needIdx)] = {
+      pageB64: b64u(pages[needIdx]),
+      proof: buildProof(levels, needIdx).map((x) => b64u(x)),
+    };
+  }
   return {
     i: idx,
-    page: b64u(pages[idx]),
-    p0: b64u(pages[p.p0]),
-    p1: b64u(pages[p.p1]),
-    p2: b64u(pages[p.p2]),
-    proof: {
-      page: buildProof(levels, idx).map((x) => b64u(x)),
-      p0: buildProof(levels, p.p0).map((x) => b64u(x)),
-      p1: buildProof(levels, p.p1).map((x) => b64u(x)),
-      p2: buildProof(levels, p.p2).map((x) => b64u(x)),
-    },
+    seg: segmentLen,
+    nodes,
   };
 };
 
@@ -244,9 +310,9 @@ const buildGraphPages = async ({ graphSeed, nonce, pageBytes, pages }) => {
   const out = new Array(pages);
   out[0] = await makeGenesisPage({ graphSeed, nonce, pageBytes });
   for (let i = 1; i < pages; i += 1) {
-    const p = parentsOf(i, graphSeed);
+    const p = await parentsOf(i, graphSeed);
     out[i] = await mixPage({
-      index: i,
+      i,
       p0: out[p.p0],
       p1: out[p.p1],
       p2: out[p.p2],
@@ -269,7 +335,10 @@ export const buildCrossEndFixture = async (vector, options = {}) => {
   const pages = await buildGraphPages({ graphSeed, nonce, pageBytes, pages: pageCount });
   if (typeof options.mutatePages === "function") options.mutatePages(pages);
   const tree = await buildMerkle(pages);
-  const opens = indices.map((idx) => toOpenEntry({ idx, pages, levels: tree.levels, graphSeed }));
+  const segs = Array.isArray(vector.segs) ? vector.segs : [];
+  const opens = await Promise.all(
+    indices.map((idx, pos) => toOpenEntry({ idx, seg: segs[pos] ?? 2, pages, levels: tree.levels, graphSeed }))
+  );
   return {
     root: tree.root,
     rootB64: b64u(tree.root),
@@ -348,13 +417,25 @@ const computeCommit = async () => {
 const computeOpen = async (payload) => {
   if (!state || !state.ready) throw new Error("commit missing");
   const indices = Array.isArray(payload.indices) ? payload.indices : [];
+  const segs = Array.isArray(payload.segs) ? payload.segs : [];
   if (!indices.length) throw new Error("indices required");
+  if (segs.length !== indices.length) throw new Error("segs required");
   const opens = [];
   for (let i = 0; i < indices.length; i += 1) {
     checkCancelled();
     const idx = Math.floor(Number(indices[i]));
+    const seg = Math.floor(Number(segs[i]));
     if (!Number.isFinite(idx) || idx < 1 || idx > state.steps) throw new Error("indices invalid");
-    opens.push(toOpenEntry({ idx, pages: state.pages, levels: state.levels, graphSeed: state.graphSeed }));
+    if (!Number.isFinite(seg)) throw new Error("segs invalid");
+    opens.push(
+      await toOpenEntry({
+        idx,
+        seg,
+        pages: state.pages,
+        levels: state.levels,
+        graphSeed: state.graphSeed,
+      })
+    );
     emitProgress("open", i + 1, indices.length, 0);
   }
   return opens;
