@@ -48,7 +48,7 @@ test("README removes stale fields and documents whitepaper knobs", async () => {
   );
   assert.match(
     readme,
-    /\| `POW_OPEN_BATCH` \| `number` \| `15` \|[^\n]*`1\.\.256`[^\n]*\|/u
+    /\| `POW_OPEN_BATCH` \| `number` \| `4` \|[^\n]*`1\.\.256`[^\n]*\|/u
   );
 });
 

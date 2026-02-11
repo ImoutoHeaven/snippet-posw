@@ -172,6 +172,7 @@ const buildConfigModule = async (secret = CONFIG_SECRET, configOverrides = {}) =
         RECAPTCHA_MIN_SCORE: 0.5,
         TURNSTILE_SITEKEY: "turn-site",
         TURNSTILE_SECRET: "turn-secret",
+        POW_BIND_PATH: true,
         POW_BIND_TLS: false,
         POW_BIND_COUNTRY: false,
         POW_BIND_ASN: false,
@@ -513,6 +514,7 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
   const originalFetch = globalThis.fetch;
 
   try {
+    let inCore1 = false;
     const seed = await bootstrapConsume(core1Handler, {
       turncheck: false,
       recaptchaEnabled: false,
@@ -530,8 +532,13 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
       const req = input instanceof Request ? input : new Request(input, init);
       const reqUrl = String(req.url);
       if (reqUrl === TURNSTILE_SITEVERIFY_URL) {
-        counters.turnstileVerifyInPowConfig += 1;
-        counters.powConfigSubrequests += 1;
+        if (inCore1) {
+          counters.turnstileVerifyInCore1 += 1;
+          counters.core1Subrequests += 1;
+        } else {
+          counters.turnstileVerifyInPowConfig += 1;
+          counters.powConfigSubrequests += 1;
+        }
         return new Response(JSON.stringify({ success: true, cdata: seed.ticket.mac }), { status: 200 });
       }
       if (reqUrl === RECAPTCHA_SITEVERIFY_URL) {
@@ -550,7 +557,12 @@ test("dual-provider atomic preflight keeps split and subrequest budget (provider
       }
       if (req.headers.has("X-Pow-Inner") || req.headers.has("X-Pow-Inner-Count")) {
         counters.powConfigSubrequests += 1;
-        return core1Handler(req, {}, {});
+        inCore1 = true;
+        try {
+          return await core1Handler(req, {}, {});
+        } finally {
+          inCore1 = false;
+        }
       }
       counters.core1Subrequests += 1;
       return new Response("ok", { status: 200 });

@@ -197,6 +197,7 @@ const buildConfigModule = async (secret = CONFIG_SECRET, overrides = {}) => {
         RECAPTCHA_MIN_SCORE: 0.5,
         TURNSTILE_SITEKEY: "turn-site",
         TURNSTILE_SECRET: "turn-secret",
+        POW_BIND_PATH: true,
         POW_BIND_TLS: false,
         POW_BIND_COUNTRY: false,
         POW_BIND_ASN: false,
@@ -878,6 +879,7 @@ const runSplitLinkedCase = async ({ pathId }) => {
 
   const originalFetch = globalThis.fetch;
   try {
+    let inPowHandler = false;
     const pageRes = await powHandler(
       new Request("https://example.com/protected", {
         method: "GET",
@@ -975,8 +977,6 @@ const runSplitLinkedCase = async ({ pathId }) => {
       powConfigSubrequests: 0,
       powJsSubrequests: 0,
     };
-    let inPowHandler = false;
-
     globalThis.fetch = async (input, init) => {
       const req = input instanceof Request ? input : new Request(input, init);
       const reqUrl = String(req.url);

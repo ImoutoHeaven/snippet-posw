@@ -1175,6 +1175,7 @@ test("pow-config marks oversized bindPath input as invalid", async () => {
   const restoreGlobals = ensureGlobals();
   const modulePath = await buildConfigModule("config-secret", {
     configOverrides: {
+      POW_BIND_PATH: true,
       bindPathMode: "query",
       bindPathQueryName: "path",
     },
@@ -1345,6 +1346,10 @@ test("pow-config records turnstile preflight evidence for atomic dual-provider t
       powcheck: false,
       turncheck: true,
       recaptchaEnabled: true,
+      POW_BIND_PATH: true,
+      POW_BIND_COUNTRY: false,
+      POW_BIND_ASN: false,
+      POW_BIND_TLS: false,
       RECAPTCHA_PAIRS: [{ sitekey: "rk1", secret: "rs1" }],
       RECAPTCHA_MIN_SCORE: 0.5,
       ATOMIC_CONSUME: true,
@@ -1438,6 +1443,7 @@ test("pow-config skips turnstile preflight when bind strategy is invalid", async
       powcheck: false,
       turncheck: true,
       recaptchaEnabled: true,
+      POW_BIND_PATH: true,
       RECAPTCHA_PAIRS: [{ sitekey: "rk1", secret: "rs1" }],
       RECAPTCHA_MIN_SCORE: 0.5,
       ATOMIC_CONSUME: true,
