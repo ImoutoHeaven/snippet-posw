@@ -137,8 +137,8 @@ Each `CONFIG` entry looks like:
 | `INNER_AUTH_QUERY_VALUE` | `string` | `""` | Query param value for internal bypass. Requires `INNER_AUTH_QUERY_NAME`. |
 | `INNER_AUTH_HEADER_NAME` | `string` | `""` | Header name for internal bypass. Requires `INNER_AUTH_HEADER_VALUE`. |
 | `INNER_AUTH_HEADER_VALUE` | `string` | `""` | Header value for internal bypass. Requires `INNER_AUTH_HEADER_NAME`. |
-| `stripInnerAuthQuery` | `boolean` | `false` | Remove the bypass query param before proxying (only when bypass matched). |
-| `stripInnerAuthHeader` | `boolean` | `false` | Remove the bypass header before proxying (only when bypass matched). |
+| `stripInnerAuthQuery` | `boolean` | `true` | Remove the bypass query param before proxying (only when bypass matched). |
+| `stripInnerAuthHeader` | `boolean` | `true` | Remove the bypass header before proxying (only when bypass matched). |
 
 ### `when` conditions
 
