@@ -1,5 +1,10 @@
 const encoder = new TextEncoder();
 
+const HASH_WASM_URL = "https://cdn.jsdelivr.net/npm/hash-wasm@4.12.0/+esm";
+let wasmSha256Promise = null;
+let wasmSha256Failed = false;
+let wasmDigestQueue = Promise.resolve();
+
 const b64u = (bytes) =>
   btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 
@@ -29,6 +34,88 @@ const hexToBytes = (hex) => {
   return out;
 };
 
+const normalizeHashInput = (data) => {
+  if (data instanceof Uint8Array) return data;
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  return encoder.encode(String(data ?? ""));
+};
+
+const normalizeWasmDigest = (digest) => {
+  if (digest instanceof Uint8Array) return digest;
+  if (ArrayBuffer.isView(digest)) {
+    return new Uint8Array(digest.buffer, digest.byteOffset, digest.byteLength);
+  }
+  if (digest instanceof ArrayBuffer) {
+    return new Uint8Array(digest);
+  }
+  if (typeof digest === "string") {
+    return hexToBytes(digest);
+  }
+  return null;
+};
+
+const getInjectedWasmFactory = () => {
+  const factory = globalThis && globalThis.__MHG_HASH_WASM_FACTORY__;
+  return typeof factory === "function" ? factory : null;
+};
+
+const loadWasmSha256 = async () => {
+  if (wasmSha256Failed) return null;
+  if (!wasmSha256Promise) {
+    wasmSha256Promise = (async () => {
+      const injectedFactory = getInjectedWasmFactory();
+      if (injectedFactory) {
+        const injectedHasher = await injectedFactory();
+        if (
+          injectedHasher &&
+          typeof injectedHasher.init === "function" &&
+          typeof injectedHasher.update === "function" &&
+          typeof injectedHasher.digest === "function"
+        ) {
+          return injectedHasher;
+        }
+        throw new Error("invalid injected hash-wasm hasher");
+      }
+      const mod = await import(HASH_WASM_URL);
+      if (!mod || typeof mod.createSHA256 !== "function") {
+        throw new Error("hash-wasm unavailable");
+      }
+      const hasher = await mod.createSHA256();
+      if (!hasher || typeof hasher.init !== "function" || typeof hasher.update !== "function") {
+        throw new Error("hash-wasm invalid");
+      }
+      return hasher;
+    })();
+  }
+  try {
+    return await wasmSha256Promise;
+  } catch {
+    wasmSha256Failed = true;
+    wasmSha256Promise = null;
+    return null;
+  }
+};
+
+const hashWithWasm = async (hasher, bytes) => {
+  let release;
+  const waitPrev = wasmDigestQueue;
+  wasmDigestQueue = new Promise((resolve) => {
+    release = resolve;
+  });
+  await waitPrev;
+  try {
+    hasher.init();
+    hasher.update(bytes);
+    const digest = await hasher.digest("binary");
+    return normalizeWasmDigest(digest);
+  } finally {
+    release();
+  }
+};
+
 const u32be = (value) => {
   const out = new Uint8Array(4);
   const v = value >>> 0;
@@ -48,11 +135,12 @@ const MERKLE_LEAF_PREFIX = "MHG1-LEAF";
 const MERKLE_NODE_PREFIX = "MHG1-NODE";
 
 const concat = (...chunks) => {
+  const normalized = chunks.map(normalizeHashInput);
   let total = 0;
-  for (const chunk of chunks) total += chunk.length;
+  for (const chunk of normalized) total += chunk.length;
   const out = new Uint8Array(total);
   let offset = 0;
-  for (const chunk of chunks) {
+  for (const chunk of normalized) {
     out.set(chunk, offset);
     offset += chunk.length;
   }
@@ -61,6 +149,17 @@ const concat = (...chunks) => {
 
 const sha256 = async (...chunks) => {
   const bytes = concat(...chunks);
+  const hasher = await loadWasmSha256();
+  if (hasher) {
+    try {
+      const digest = await hashWithWasm(hasher, bytes);
+      if (digest) return digest;
+      throw new Error("invalid hash-wasm digest");
+    } catch {
+      wasmSha256Failed = true;
+      wasmSha256Promise = null;
+    }
+  }
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return new Uint8Array(digest);
 };
@@ -287,6 +386,11 @@ const normalizeMixRounds = (value, fallback = 2) => {
   return Math.max(1, Math.min(4, Math.floor(num)));
 };
 
+const shouldYield = (counter, every) =>
+  Number.isFinite(every) && every > 0 && counter % every === 0;
+
+const sleep0 = () => new Promise((resolve) => setTimeout(resolve, 0));
+
 const buildEqSet = (index, segmentLen) => {
   const start = Math.max(1, index - segmentLen + 1);
   const out = [];
@@ -320,10 +424,22 @@ const toOpenEntry = async ({ idx, seg, pages, levels, graphSeed }) => {
   };
 };
 
-const buildGraphPages = async ({ graphSeed, nonce, pageBytes, mixRounds = 2, pages }) => {
+const buildGraphPages = async ({
+  graphSeed,
+  nonce,
+  pageBytes,
+  mixRounds = 2,
+  pages,
+  yieldEvery = 1024,
+  onProgress,
+  checkCancelled,
+}) => {
   const out = new Array(pages);
+  const total = Math.max(0, pages - 1);
   out[0] = await makeGenesisPage({ graphSeed, nonce, pageBytes });
+  if (typeof onProgress === "function") onProgress(0, total);
   for (let i = 1; i < pages; i += 1) {
+    if (typeof checkCancelled === "function") checkCancelled();
     const p = await parentsOf(i, graphSeed);
     out[i] = await mixPage({
       i,
@@ -335,6 +451,10 @@ const buildGraphPages = async ({ graphSeed, nonce, pageBytes, mixRounds = 2, pag
       pageBytes,
       mixRounds,
     });
+    if (typeof onProgress === "function") onProgress(i, total);
+    if (shouldYield(i, yieldEvery)) {
+      await sleep0();
+    }
   }
   return out;
 };
@@ -382,6 +502,8 @@ const initWorkerState = (payload) => {
     hashcashBits: Math.max(0, Math.floor(Number(payload.hashcashBits) || 0)),
     pageBytes: normalizePageBytes(payload.pageBytes, 64),
     mixRounds: normalizeMixRounds(payload.mixRounds, 2),
+    yieldEvery: Math.max(1, Math.floor(Number(payload.yieldEvery) || 1024)),
+    progressEvery: Math.max(1, Math.floor(Number(payload.progressEvery) || 1024)),
     nonce: "",
     graphSeed: null,
     nonce16: null,
@@ -399,6 +521,7 @@ const checkCancelled = () => {
 
 const computeCommit = async () => {
   if (!state) throw new Error("not initialized");
+  const progressEvery = state.progressEvery;
   let attempt = 0;
   while (true) {
     checkCancelled();
@@ -412,6 +535,13 @@ const computeCommit = async () => {
       pageBytes: state.pageBytes,
       mixRounds: state.mixRounds,
       pages: state.steps + 1,
+      yieldEvery: state.yieldEvery,
+      checkCancelled,
+      onProgress: (done, total) => {
+        if (done === 0 || done === total || done % progressEvery === 0) {
+          emitProgress("chain", done, total, attempt - 1);
+        }
+      },
     });
     const tree = await buildMerkle(pages);
     if (state.hashcashBits > 0) {

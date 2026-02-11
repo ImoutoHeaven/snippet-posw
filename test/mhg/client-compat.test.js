@@ -199,3 +199,66 @@ test("client still performs commit->challenge->open loop", async () => {
   assert.equal(typeof openBodies[0].opens[0].nodes, "object");
   assert.equal(Object.hasOwn(openBodies[0].opens[0], "page"), false);
 });
+
+test("client keeps screening log visible when worker only reports hashcash", async () => {
+  const glue = await importGlue();
+
+  globalThis.Worker = class FakeWorker {
+    constructor() {
+      this.listeners = new Map();
+    }
+    addEventListener(type, cb) {
+      const list = this.listeners.get(type) || [];
+      list.push(cb);
+      this.listeners.set(type, list);
+    }
+    postMessage(msg) {
+      const emit = (data) => {
+        const list = this.listeners.get("message") || [];
+        for (const cb of list) cb({ data });
+      };
+      if (msg.type === "INIT") emit({ type: "INIT_OK", rid: msg.rid });
+      if (msg.type === "COMMIT") {
+        emit({ type: "PROGRESS", phase: "hashcash", attempt: 1 });
+        emit({ type: "COMMIT_OK", rid: msg.rid, rootB64: "AA", nonce: "nonce" });
+      }
+      if (msg.type === "CANCEL") emit({ type: "CANCEL_OK", rid: msg.rid });
+      if (msg.type === "DISPOSE") emit({ type: "DISPOSE_OK", rid: msg.rid });
+    }
+    terminate() {}
+  };
+
+  globalThis.fetch = async (url) => {
+    const endpoint = String(url);
+    if (endpoint.endsWith("/worker.js")) {
+      return { ok: true, status: 200, text: async () => "self.onmessage = () => {};" };
+    }
+    if (endpoint.endsWith("/__pow/commit")) {
+      return {
+        ok: false,
+        status: 500,
+        headers: { get: () => null },
+        json: async () => ({}),
+      };
+    }
+    throw new Error(`unexpected fetch: ${endpoint}`);
+  };
+
+  const args = [
+    b64u("binding"),
+    2,
+    b64u("1.2.3.4.5.6"),
+    "pathhash",
+    3,
+    2,
+    b64u("https://example.com/ok"),
+    b64u("/__pow"),
+    b64u(makeModuleUrl("https://example.com/worker.js")),
+    b64u("{}"),
+    "0",
+  ];
+
+  await glue.default(...args);
+  const logHtml = globalThis.document.getElementById("log").innerHTML;
+  assert.equal(logHtml.includes("Screening hash"), true);
+});

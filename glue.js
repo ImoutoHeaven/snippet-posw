@@ -1455,20 +1455,25 @@ const runPowFlow = async (
     const verifySpinChars = "|/-\\";
     let verifyBaseMsg = "";
 
+    const ensureHashingLine = () => {
+      if (spinIndex !== -1) return;
+      spinIndex = log(t("computing_hash_chain"));
+      spinTimer = setInterval(() => {
+        let msg = t("computing_hash_chain");
+        if (attemptCount > 0) {
+          msg = t("screening_hash_attempt", { n: attemptCount });
+        }
+        const spinner =
+          '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
+        update(spinIndex, msg + " " + spinner);
+      }, 120);
+    };
+
     let activeWorker = null;
     const onProgress = (source, progress) => {
       if (source !== activeWorker) return;
-      if (progress.phase === "chain" && spinIndex === -1) {
-        spinIndex = log(t("computing_hash_chain"));
-        spinTimer = setInterval(() => {
-          let msg = t("computing_hash_chain");
-          if (attemptCount > 0) {
-            msg = t("screening_hash_attempt", { n: attemptCount });
-          }
-          const spinner =
-            '<span class="yellow">' + spinChars[spinFrame++ % spinChars.length] + "</span>";
-          update(spinIndex, msg + " " + spinner);
-        }, 120);
+      if (progress.phase === "chain" || progress.phase === "hashcash") {
+        ensureHashingLine();
       }
       if (progress.phase === "hashcash" && typeof progress.attempt === "number") {
         attemptCount = progress.attempt;
@@ -1536,6 +1541,7 @@ const runPowFlow = async (
     if (raceRpcs.length === 0) throw new Error("Worker Missing");
 
     activeWorker = raceRpcs[0].worker;
+    ensureHashingLine();
 
     const commitRes = await raceFirstSuccess(
       raceRpcs.map((entry, index) =>
