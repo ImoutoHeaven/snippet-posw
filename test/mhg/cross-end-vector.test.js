@@ -5,6 +5,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { join } from "node:path";
 
 import { verifyOpenBatchVector } from "../../lib/mhg/verify.js";
+import { mixPage } from "../../lib/mhg/mix-aes.js";
+import { parentsOf } from "../../lib/mhg/graph.js";
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const encoder = new TextEncoder();
@@ -145,4 +147,34 @@ test("1-bit tamper is rejected by server verification", async () => {
   const out = await verifyOpenBatchVector(fixture);
   assert.equal(out.ok, false);
   assert.equal(out.reason, "equation_failed");
+});
+
+test("server mixPage matches worker bytes for identical inputs", async () => {
+  const ticketB64 = "dGVzdC10aWNrZXQ";
+  const steps = 32;
+  const index = 17;
+  const { commit, open } = await runWorkerFlow({ ticketB64, steps, indices: [index], segs: [1] });
+  const graphSeed = await deriveGraphSeed16(ticketB64, commit.nonce);
+  const nonce = await deriveNonce16(commit.nonce);
+  const parent = await parentsOf(index, graphSeed);
+  const entry = open.opens[0];
+
+  const readNodePage = (idx) => {
+    const node = entry.nodes[String(idx)];
+    assert.ok(node, `missing node ${idx} from worker witness`);
+    return b64uToBytes(node.pageB64);
+  };
+
+  const serverPage = await mixPage({
+    i: index,
+    p0: readNodePage(parent.p0),
+    p1: readNodePage(parent.p1),
+    p2: readNodePage(parent.p2),
+    graphSeed,
+    nonce,
+    pageBytes: 64,
+    mixRounds: 2,
+  });
+
+  assert.deepEqual(serverPage, readNodePage(index));
 });

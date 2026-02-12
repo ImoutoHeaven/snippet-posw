@@ -395,6 +395,15 @@ This is implementation-level optimization work and does not change protocol sema
 - During `mixPage`, both server (`lib/mhg/mix-aes.js`) and worker (`esm/mhg-worker.js`) derive per-index PA/PB once and reuse across mix rounds.
 - AES-CBC trim uses `subarray(0, pageBytes)` view-based slicing instead of copy-based trim to reduce transient buffer copy overhead.
 
+### MHG full-dynamic offset cutover
+
+- Offset scheduling is now full-dynamic (`off1..off5` evolve from round state) and fully replaces the previous semi-static schedule.
+- This rollout is a hard cutover: publish the new worker asset first, make `POW_ESM_URL` point to that exact version (with cache busting), then synchronize updated server snippets.
+- Minimal cache-busting example: `POW_ESM_URL="https://cdn.example.com/esm/esm.js?v=mhg-fdo-20260212"`.
+- Mixed-version windows are unsupported; in-flight commit/ticket chains can fail verification until both sides run the same formula.
+- During version skew, common symptoms are short-lived `equation_failed` or other verification-failed responses on commit/challenge/open flows.
+- After versions converge on both server and worker, these mixed-version failures should disappear without extra migration logic.
+
 ## MHG witness closure: why sampling works
 
 - The browser builds memory-hard pages `page[0..L]` and commits to the full set with a Merkle root (`rootB64`).

@@ -55,32 +55,40 @@ const aesCbcNoPadding = async ({ key, iv, input, pageBytes }) => {
   return encrypted.slice(0, pageBytes);
 };
 
-const referenceMixPage = async ({ i, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds = 2 }) => {
+const rotl32 = (v, r) => ((v << r) | (v >>> (32 - r))) >>> 0;
+
+const referenceMixPageFullDynamic = async ({ i, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds = 2 }) => {
   const keyMaterial = await sha256(encoder.encode("MHG1-KEY"), graphSeed, nonce);
   const key = await subtle.importKey("raw", keyMaterial.slice(0, 32), { name: "AES-CBC" }, false, ["encrypt"]);
-
+  const pa = await sha256(encoder.encode("MHG1-PA"), graphSeed, nonce, u32be(i));
+  const pb = await sha256(encoder.encode("MHG1-PB"), graphSeed, nonce, u32be(i));
+  let dyn1 = (((pa[0] << 24) | (pa[1] << 16) | (pa[2] << 8) | pa[3]) >>> 0) % pageBytes;
+  let dyn2 = (((pa[4] << 24) | (pa[5] << 16) | (pa[6] << 8) | pa[7]) >>> 0) % pageBytes;
+  let dyn3 = (((pa[8] << 24) | (pa[9] << 16) | (pa[10] << 8) | pa[11]) >>> 0) % pageBytes;
+  let dyn4 = (((pa[12] << 24) | (pa[13] << 16) | (pa[14] << 8) | pa[15]) >>> 0) % pageBytes;
+  let dyn5 = (((pa[16] << 24) | (pa[17] << 16) | (pa[18] << 8) | pa[19]) >>> 0) % pageBytes;
+  const iv1 = pb.slice(0, 16);
+  const iv2 = pb.slice(16, 32);
   let state = p0;
-  for (let round = 0; round < mixRounds; round += 1) {
-    const pa = await sha256(encoder.encode("MHG1-PA"), graphSeed, nonce, u32be(i));
-    const pb = await sha256(encoder.encode("MHG1-PB"), graphSeed, nonce, u32be(i));
-    const off1 = ((pa[0] << 24) | (pa[1] << 16) | (pa[2] << 8) | pa[3]) >>> 0;
-    const off2 = ((pa[4] << 24) | (pa[5] << 16) | (pa[6] << 8) | pa[7]) >>> 0;
-    const off3 = ((pa[8] << 24) | (pa[9] << 16) | (pa[10] << 8) | pa[11]) >>> 0;
-    const off4 = ((pa[12] << 24) | (pa[13] << 16) | (pa[14] << 8) | pa[15]) >>> 0;
-    const off5 = ((pa[16] << 24) | (pa[17] << 16) | (pa[18] << 8) | pa[19]) >>> 0;
-    const iv1 = pb.slice(0, 16);
-    const iv2 = pb.slice(16, 32);
 
-    const r0 = xorBytes(state, rotlBytes(p1, off1 % pageBytes), rotlBytes(p2, off2 % pageBytes));
-    const x1 = await aesCbcNoPadding({ key, iv: iv1, input: r0, pageBytes });
-    const x2 = xorBytes(x1, rotlBytes(p1, off3 % pageBytes), rotlBytes(p2, off4 % pageBytes));
+  for (let round = 0; round < mixRounds; round += 1) {
+    const dep = ((state[0] << 24) | (state[1] << 16) | (state[2] << 8) | state[3]) >>> 0;
+    dyn1 = (dyn1 + dep) % pageBytes;
+    dyn2 = (dyn2 + rotl32(dep, 8)) % pageBytes;
+    dyn3 = (dyn3 + rotl32(dep, 16)) % pageBytes;
+    dyn4 = (dyn4 + rotl32(dep, 24)) % pageBytes;
+    dyn5 = (dyn5 + ((dep ^ 0x9e3779b9) >>> 0)) % pageBytes;
+    const x0 = xorBytes(state, rotlBytes(p1, dyn1), rotlBytes(p2, dyn2));
+    const x1 = await aesCbcNoPadding({ key, iv: iv1, input: x0, pageBytes });
+    const x2 = xorBytes(x1, rotlBytes(p1, dyn3), rotlBytes(p2, dyn4));
     const x3 = await aesCbcNoPadding({ key, iv: iv2, input: x2, pageBytes });
-    state = xorBytes(x3, r0, rotlBytes(x1, off5 % pageBytes));
+    state = xorBytes(x3, x0, rotlBytes(x1, dyn5));
   }
+
   return state;
 };
 
-test("mixPage defaults to whitepaper two-round output", async () => {
+test("mixPage defaults to full-dynamic two-round output", async () => {
   const { mixPage } = await import("../../lib/mhg/mix-aes.js");
   const graphSeed = Uint8Array.from({ length: 16 }, (_, i) => i);
   const nonce = Uint8Array.from({ length: 16 }, (_, i) => 15 - i);
@@ -89,7 +97,7 @@ test("mixPage defaults to whitepaper two-round output", async () => {
   const p1 = Uint8Array.from({ length: pageBytes }, (_, i) => (i * 3) & 0xff);
   const p2 = Uint8Array.from({ length: pageBytes }, (_, i) => (255 - i) & 0xff);
 
-  const expected = await referenceMixPage({ i: 7, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds: 2 });
+  const expected = await referenceMixPageFullDynamic({ i: 7, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds: 2 });
   const actual = await mixPage({ i: 7, p0, p1, p2, graphSeed, nonce, pageBytes });
 
   assert.deepEqual(Buffer.from(actual), Buffer.from(expected));
@@ -108,6 +116,21 @@ test("mixPage supports configurable rounds and differs from one-round mode", asy
   const twoRounds = await mixPage({ i: 9, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds: 2 });
 
   assert.notDeepEqual(Buffer.from(oneRound), Buffer.from(twoRounds));
+});
+
+test("mixPage matches full-dynamic offsets reference", async () => {
+  const { mixPage } = await import("../../lib/mhg/mix-aes.js");
+  const graphSeed = Uint8Array.from({ length: 16 }, (_, i) => i + 3);
+  const nonce = Uint8Array.from({ length: 16 }, (_, i) => 23 - i);
+  const pageBytes = 64;
+  const p0 = Uint8Array.from({ length: pageBytes }, (_, i) => (i * 11) & 0xff);
+  const p1 = Uint8Array.from({ length: pageBytes }, (_, i) => (i * 17) & 0xff);
+  const p2 = Uint8Array.from({ length: pageBytes }, (_, i) => (255 - i * 9) & 0xff);
+
+  const expected = await referenceMixPageFullDynamic({ i: 7, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds: 2 });
+  const actual = await mixPage({ i: 7, p0, p1, p2, graphSeed, nonce, pageBytes, mixRounds: 2 });
+
+  assert.deepEqual(Buffer.from(actual), Buffer.from(expected));
 });
 
 test("mixPage derives PA/PB once per page index", async () => {
