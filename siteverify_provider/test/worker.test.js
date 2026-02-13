@@ -97,6 +97,7 @@ const createPowNonceDb = () => {
   const rows = new Map();
   let initRuns = 0;
   let lastInsertBindValues = null;
+  let cleanupRuns = 0;
 
   const db = {
     prepare(sql) {
@@ -132,6 +133,18 @@ const createPowNonceDb = () => {
                 });
                 return { success: true, meta: { changes: 1 } };
               }
+              if (/DELETE FROM pow_nonce_ledger/u.test(sql)) {
+                const nowSec = Number(values[0]);
+                let changes = 0;
+                for (const [consumeKey, row] of rows.entries()) {
+                  if (Number(row.expire_at) < nowSec) {
+                    rows.delete(consumeKey);
+                    changes += 1;
+                  }
+                }
+                cleanupRuns += 1;
+                return { success: true, meta: { changes } };
+              }
               throw new Error(`unexpected run() SQL: ${sql}`);
             },
           };
@@ -152,6 +165,7 @@ const createPowNonceDb = () => {
     rows,
     getInitRuns: () => initRuns,
     getLastInsertBindValues: () => lastInsertBindValues,
+    getCleanupRuns: () => cleanupRuns,
   };
 };
 
@@ -167,6 +181,15 @@ const createAtomicConsumeOnlyDb = () => {
               throw new Error(`unexpected first() SQL in atomic mode: ${sql}`);
             },
             async run() {
+              if (/DELETE FROM pow_nonce_ledger/u.test(sql)) {
+                const nowSec = Number(values[0]);
+                for (const [consumeKey, row] of rows.entries()) {
+                  if (Number(row.expire_at) < nowSec) {
+                    rows.delete(consumeKey);
+                  }
+                }
+                return { success: true, meta: { changes: 1 } };
+              }
               if (!/INSERT INTO pow_nonce_ledger/u.test(sql)) {
                 throw new Error(`unexpected run() SQL in atomic mode: ${sql}`);
               }
@@ -196,6 +219,53 @@ const createAtomicConsumeOnlyDb = () => {
     },
   };
 };
+
+test("pow consume insert may schedule lazy cleanup via waitUntil", async () => {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const payload = buildProviderPayload();
+  payload.powConsume = {
+    consumeKey: "consume-key-lazy-cleanup",
+    expireAt: nowSec + 60,
+  };
+  const req = await buildAuthorizedRequest({ body: JSON.stringify(payload) });
+  const dbMock = createPowNonceDb();
+  dbMock.rows.set("expired-row", { expire_at: nowSec - 30, created_at: nowSec - 90 });
+  dbMock.rows.set("future-row", { expire_at: nowSec + 300, created_at: nowSec - 20 });
+
+  const originalFetch = globalThis.fetch;
+  const originalRandom = Math.random;
+  const waitUntilCalls = [];
+  const ctx = {
+    waitUntil(promise) {
+      waitUntilCalls.push(Promise.resolve(promise));
+    },
+  };
+  globalThis.fetch = (url) => {
+    const reqUrl = String(url);
+    if (reqUrl === TURNSTILE_SITEVERIFY_URL) {
+      return jsonFetchResponse({
+        success: true,
+        cdata: payload.ticketMac,
+      });
+    }
+    throw new Error(`unexpected url: ${reqUrl}`);
+  };
+  Math.random = () => 0;
+
+  try {
+    const res = await worker.fetch(req, { POW_NONCE_DB: dbMock.db }, ctx);
+    assert.equal(res.status, 200);
+    assert.equal(waitUntilCalls.length, 1);
+
+    await Promise.all(waitUntilCalls);
+    assert.equal(dbMock.rows.has("expired-row"), false);
+    assert.equal(dbMock.rows.has("future-row"), true);
+    assert.equal(dbMock.getCleanupRuns(), 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    Math.random = originalRandom;
+  }
+});
 
 test("worker returns 404 for missing authorization", async () => {
   const res = await worker.fetch(

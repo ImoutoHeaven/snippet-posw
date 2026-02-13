@@ -1,6 +1,7 @@
 const AUTH_WINDOW_SEC = 10;
 const MAX_BODY_BYTES = 256 * 1024;
 const D1_BINDING = "POW_NONCE_DB";
+const LEDGER_CLEANUP_SAMPLE_RATE = 0.01;
 const INIT_TABLES = false;
 const SHARED_SECRETS = Object.freeze({
   v1: "replace-me",
@@ -383,7 +384,7 @@ const maybeInitConsumeLedger = async (env, db) => {
 
 const consumePowKey = async (db, consumeKey, expireAt, nowSec) => {
   if (expireAt <= nowSec) {
-    return { ok: false, reason: "stale" };
+    return { ok: false, reason: "stale", attemptedInsert: false };
   }
 
   const result = await db
@@ -394,9 +395,23 @@ const consumePowKey = async (db, consumeKey, expireAt, nowSec) => {
     .run();
   const changes = Number(result?.meta?.changes ?? result?.changes ?? 0);
   if (changes === 1) {
-    return { ok: true, reason: "ok" };
+    return { ok: true, reason: "ok", attemptedInsert: true };
   }
-  return { ok: false, reason: "duplicate" };
+  return { ok: false, reason: "duplicate", attemptedInsert: true };
+};
+
+const cleanupExpiredConsumeRows = async (db, nowSec) => {
+  await db.prepare("DELETE FROM pow_nonce_ledger WHERE expire_at < ?1").bind(nowSec).run();
+};
+
+const maybeScheduleLedgerCleanup = (ctx, db, nowSec) => {
+  if (!ctx || typeof ctx.waitUntil !== "function") return;
+  if (Math.random() >= LEDGER_CLEANUP_SAMPLE_RATE) return;
+  ctx.waitUntil(
+    cleanupExpiredConsumeRows(db, nowSec).catch(() => {
+      // Best-effort background cleanup; never fail the request path.
+    }),
+  );
 };
 
 const runProviders = async (request, parsed) => {
@@ -439,7 +454,7 @@ const runProviders = async (request, parsed) => {
 };
 
 export default {
-  async fetch(request, env = {}) {
+  async fetch(request, env = {}, ctx = {}) {
     const authContext = parseAuthContext(request);
     if (!authContext) {
       return new Response(null, { status: 404 });
@@ -486,6 +501,9 @@ export default {
           providerRequest.powConsume.expireAt,
           nowSec,
         );
+        if (consumeResult.attemptedInsert) {
+          maybeScheduleLedgerCleanup(ctx, db, nowSec);
+        }
         if (!consumeResult.ok) {
           return jsonResponse(baseContract({ reason: consumeResult.reason }));
         }
