@@ -158,8 +158,16 @@ A request is allowed when `(m & requiredMask) == requiredMask`.
 
 - `/__pow/cap` exists only for turnstile captcha-only non-atomic flow.
 - Combined non-atomic flow verifies turnstile during final `POST /__pow/open`.
+- Non-atomic PoW-only flow with `AGGREGATOR_POW_ATOMIC_CONSUME=true` verifies consume via aggregator in final `POST /__pow/open` even when `turncheck=false`.
 - Atomic flow verifies on the business path with strict consume token validation.
 - Atomic input transport priority remains cookie > header > query.
+
+### Atomic transport details (PoW-only)
+
+- When atomic PoW-only succeeds, `glue.js` forwards consume via one of: postMessage payload (`type: "POW_ATOMIC", mode: "pow"`), short-lived atomic cookie, or query fallback.
+- Query/header names remain config-driven (`ATOMIC_CONSUME_QUERY` / `ATOMIC_CONSUME_HEADER`, defaults: `__ct` / `x-consume`).
+- `pow-config` accepts consume-only atomic headers (`x-consume`) without requiring `x-turnstile`.
+- `pow-config` also accepts cookie mode `1|c||<consume>` (empty captcha token) for PoW-only atomic redirects.
 
 ## 8-path matrix (PoW x Atomic x Turnstile)
 
@@ -199,6 +207,9 @@ Subrequest matrix (API + business paths):
 - Non-auth responses are fixed 200 with ok/reason.
 - Provider diagnostics are preserved: rawResponse always returned.
 - Provider transport failures are normalized: provider network failure maps to provider `httpStatus=502`.
+- PoW consume requires D1 binding name `POW_NONCE_DB`.
+- Missing `POW_NONCE_DB` on consume requests returns `reason: "pow_nonce_db_missing"`.
+- Schema bootstrap is opt-in via `INIT_TABLES` (top-level const in `siteverify_provider/src/worker.js`, optionally overridden by env `INIT_TABLES === true`).
 
 ### MHG mix hot-path optimizations
 

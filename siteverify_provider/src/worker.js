@@ -1,6 +1,7 @@
 const AUTH_WINDOW_SEC = 10;
 const MAX_BODY_BYTES = 256 * 1024;
 const D1_BINDING = "POW_NONCE_DB";
+const INIT_TABLES = false;
 const SHARED_SECRETS = Object.freeze({
   v1: "replace-me",
 });
@@ -275,6 +276,8 @@ const parseStrictPositiveInteger = (value) => {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 };
 
+const shouldInitTables = (env) => INIT_TABLES === true || env?.INIT_TABLES === true;
+
 const parseProviderRequest = (body) => {
   const root = parseJsonObject(body);
   if (!root) return null;
@@ -372,7 +375,7 @@ const verifyTurnstile = async ({ provider, remoteip, ticketMac }) => {
 
 const maybeInitConsumeLedger = async (env, db) => {
   // Schema init is explicitly opt-in; only literal true enables it.
-  if (!db || env?.INIT_TABLES !== true) {
+  if (!db || !shouldInitTables(env)) {
     return;
   }
   await db.prepare(INIT_SQL).run();
@@ -472,7 +475,7 @@ export default {
     if (providerRequest.powConsume) {
       const db = env?.[D1_BINDING];
       if (!db) {
-        return jsonResponse(baseContract({ reason: "provider_failed" }));
+        return jsonResponse(baseContract({ reason: "pow_nonce_db_missing" }));
       }
       try {
         await maybeInitConsumeLedger(env, db);

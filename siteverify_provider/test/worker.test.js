@@ -453,6 +453,33 @@ test("consume-only request succeeds once then returns duplicate", async () => {
   assert.equal(secondBody.reason, "duplicate");
 });
 
+test("pow consume request without POW_NONCE_DB returns explicit reason", async () => {
+  const payload = buildProviderPayload();
+  payload.powConsume = {
+    consumeKey: "consume-key-missing-db",
+    expireAt: Math.floor(Date.now() / 1000) + 60,
+  };
+  const req = await buildAuthorizedRequest({ body: JSON.stringify(payload) });
+
+  const originalFetch = globalThis.fetch;
+  let fetchCalls = 0;
+  globalThis.fetch = () => {
+    fetchCalls += 1;
+    throw new Error("unexpected turnstile fetch when db binding missing");
+  };
+
+  try {
+    const res = await worker.fetch(req, {});
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, false);
+    assert.equal(body.reason, "pow_nonce_db_missing");
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("concurrent duplicate consumes allow exactly one ok result", async () => {
   const payload = buildProviderPayload();
   payload.powConsume = {
@@ -628,6 +655,39 @@ test("INIT_TABLES initializes consume ledger and does not persist powNonce", asy
     assert.equal(bindValues?.length, 4);
     assert.equal(bindValues?.[0], payload.powConsume.consumeKey);
     assert.equal(bindValues?.[1], payload.powConsume.expireAt);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("INIT_TABLES remains off unless explicitly enabled", async () => {
+  const payload = buildProviderPayload();
+  payload.powConsume = {
+    consumeKey: "consume-key-no-init",
+    expireAt: Math.floor(Date.now() / 1000) + 60,
+  };
+  const req = await buildAuthorizedRequest({ body: JSON.stringify(payload), nonce: "nonce-no-init" });
+  const dbMock = createPowNonceDb();
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (url) => {
+    const reqUrl = String(url);
+    if (reqUrl === TURNSTILE_SITEVERIFY_URL) {
+      return jsonFetchResponse({
+        success: true,
+        cdata: payload.ticketMac,
+      });
+    }
+    throw new Error(`unexpected url: ${reqUrl}`);
+  };
+
+  try {
+    const res = await worker.fetch(req, { POW_NONCE_DB: dbMock.db });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.reason, "ok");
+    assert.equal(dbMock.getInitRuns(), 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

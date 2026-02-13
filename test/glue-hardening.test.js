@@ -606,4 +606,141 @@ test("glue hardening", { concurrency: 1 }, async (t) => {
     assert.equal(calls[0].target, "parent");
     assert.equal(calls[0].origin, "https://example.com");
   });
+
+  await t.test("pow-only atomic forwards consume token via query fallback", async () => {
+    let redirectUrl = null;
+    const consume = "v2.ticket.exp.any.1.mac";
+    const glue = await importGlue();
+    Object.defineProperty(globalThis.document, "cookie", {
+      configurable: true,
+      get() {
+        return "";
+      },
+      set() {},
+    });
+    globalThis.window.location.replace = (url) => {
+      redirectUrl = String(url);
+    };
+    globalThis.Worker = class FakeWorker {
+      constructor() {
+        this.listeners = new Map();
+      }
+      addEventListener(type, cb) {
+        const list = this.listeners.get(type) || [];
+        list.push(cb);
+        this.listeners.set(type, list);
+      }
+      postMessage(msg) {
+        const emit = (data) => {
+          const list = this.listeners.get("message") || [];
+          for (const cb of list) cb({ data });
+        };
+        if (msg.type === "INIT") emit({ rid: msg.rid, type: "OK" });
+        if (msg.type === "COMMIT") {
+          emit({ rid: msg.rid, type: "OK", rootB64: "root", nonce: 1 });
+        }
+        if (msg.type === "OPEN") {
+          emit({ rid: msg.rid, type: "OK", opens: ["open-1"] });
+        }
+      }
+      terminate() {}
+    };
+    globalThis.fetch = async (url, init) => {
+      const textUrl = String(url);
+      if (textUrl === "https://example.com/worker.js") {
+        return { text: async () => "self.onmessage = () => {};" };
+      }
+      if (textUrl === "/__pow/commit") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      if (textUrl === "/__pow/challenge") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ sid: "sid-1", cursor: 0, token: "tok-1", indices: [0], segs: ["seg-0"] }),
+        };
+      }
+      if (textUrl === "/__pow/open") {
+        const body = init && init.body ? JSON.parse(init.body) : {};
+        assert.equal(body.sid, "sid-1");
+        return { ok: true, status: 200, json: async () => ({ done: true, consume }) };
+      }
+      throw new Error(`unexpected fetch ${textUrl}`);
+    };
+    const args = makeRunPowArgs({
+      steps: 1,
+      captchaCfgB64: encodeCaptchaCfg({}),
+      atomicCfg: "1|__ts|__tt|__ct|x-turnstile|x-ticket|x-consume|__Secure-pow_a",
+    });
+    await glue.default(...args);
+    assert.equal(typeof redirectUrl, "string");
+    const forwarded = new URL(redirectUrl, "https://example.com");
+    assert.equal(forwarded.searchParams.get("__ct"), consume);
+  });
+
+  await t.test("pow-only atomic embedded posts consume token", async () => {
+    const consume = "v2.ticket.exp.any.1.mac";
+    const posts = [];
+    const glue = await importGlue();
+    globalThis.window.location.href = "https://example.com/challenge";
+    globalThis.window.parent = {
+      closed: false,
+      location: { href: "https://example.com/outer" },
+      postMessage: (msg, origin) => posts.push({ msg, origin }),
+    };
+    globalThis.Worker = class FakeWorker {
+      constructor() {
+        this.listeners = new Map();
+      }
+      addEventListener(type, cb) {
+        const list = this.listeners.get(type) || [];
+        list.push(cb);
+        this.listeners.set(type, list);
+      }
+      postMessage(msg) {
+        const emit = (data) => {
+          const list = this.listeners.get("message") || [];
+          for (const cb of list) cb({ data });
+        };
+        if (msg.type === "INIT") emit({ rid: msg.rid, type: "OK" });
+        if (msg.type === "COMMIT") {
+          emit({ rid: msg.rid, type: "OK", rootB64: "root", nonce: 1 });
+        }
+        if (msg.type === "OPEN") {
+          emit({ rid: msg.rid, type: "OK", opens: ["open-1"] });
+        }
+      }
+      terminate() {}
+    };
+    globalThis.fetch = async (url) => {
+      const textUrl = String(url);
+      if (textUrl === "https://example.com/worker.js") {
+        return { text: async () => "self.onmessage = () => {};" };
+      }
+      if (textUrl === "/__pow/commit") {
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+      if (textUrl === "/__pow/challenge") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ sid: "sid-1", cursor: 0, token: "tok-1", indices: [0], segs: ["seg-0"] }),
+        };
+      }
+      if (textUrl === "/__pow/open") {
+        return { ok: true, status: 200, json: async () => ({ done: true, consume }) };
+      }
+      throw new Error(`unexpected fetch ${textUrl}`);
+    };
+    const args = makeRunPowArgs({
+      steps: 1,
+      captchaCfgB64: encodeCaptchaCfg({}),
+      atomicCfg: "1|__ts|__tt|__ct|x-turnstile|x-ticket|x-consume|__Secure-pow_a",
+    });
+    await glue.default(...args);
+    assert.equal(posts.length, 1);
+    const msg = posts[0].msg;
+    assert.equal(msg.type, "POW_ATOMIC");
+    assert.equal(msg.consume, consume);
+  });
 });

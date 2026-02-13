@@ -1209,6 +1209,124 @@ test("pow-config frontloads atomic strategy with cookie priority and strips requ
   }
 });
 
+test("pow-config accepts header-only consume token", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret", {
+    configOverrides: {
+      STRIP_ATOMIC_QUERY: true,
+      STRIP_ATOMIC_HEADERS: true,
+    },
+  });
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (request) => {
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const req = new Request("https://example.com/protected", {
+      headers: {
+        "CF-Connecting-IP": "1.2.3.4",
+        "x-consume": "v2.ticket.exp.any.1.mac",
+      },
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "fetch called with modified request");
+
+    assert.equal(forwarded.headers.get("x-consume"), null);
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.atomic.captchaToken, "");
+    assert.equal(parsed.s.atomic.ticketB64, "");
+    assert.equal(parsed.s.atomic.consumeToken, "v2.ticket.exp.any.1.mac");
+    assert.equal(parsed.s.atomic.fromCookie, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config accepts cookie mode c with empty captcha token", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret");
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (request) => {
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const req = new Request("https://example.com/protected", {
+      headers: {
+        "CF-Connecting-IP": "1.2.3.4",
+        Cookie: `__Secure-pow_a=${encodeAtomicCookie("1|c||v2.ticket.exp.any.1.mac")}`,
+      },
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "fetch called with modified request");
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.atomic.captchaToken, "");
+    assert.equal(parsed.s.atomic.ticketB64, "");
+    assert.equal(parsed.s.atomic.consumeToken, "v2.ticket.exp.any.1.mac");
+    assert.equal(parsed.s.atomic.fromCookie, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("pow-config rejects cookie mode t with empty captcha token", async () => {
+  const restoreGlobals = ensureGlobals();
+  const modulePath = await buildConfigModule("config-secret");
+  const mod = await import(`${pathToFileURL(modulePath).href}?v=${Date.now()}`);
+  const handler = mod.default.fetch;
+  let forwarded = null;
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async (request) => {
+      forwarded = request;
+      return new Response("ok", { status: 200 });
+    };
+
+    const req = new Request("https://example.com/protected", {
+      headers: {
+        "CF-Connecting-IP": "1.2.3.4",
+        Cookie: `__Secure-pow_a=${encodeAtomicCookie("1|t||ticketabc")}`,
+      },
+    });
+    const res = await handler(req);
+    assert.equal(res.status, 200);
+    assert.ok(forwarded, "fetch called with modified request");
+
+    const { payload } = readInnerPayload(forwarded.headers);
+    const decoded = base64UrlDecode(payload);
+    assert.ok(decoded, "payload decodes");
+    const parsed = JSON.parse(decoded);
+    assert.equal(parsed.s.atomic.captchaToken, "");
+    assert.equal(parsed.s.atomic.ticketB64, "");
+    assert.equal(parsed.s.atomic.consumeToken, "");
+    assert.equal(parsed.s.atomic.fromCookie, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
 test("pow-config omits turnstilePreflight when consume integrity precheck fails", async () => {
   const restoreGlobals = ensureGlobals();
   const modulePath = await buildConfigModule("config-secret", {

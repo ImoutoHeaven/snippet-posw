@@ -1316,6 +1316,206 @@ test("pow-only atomic mode requires consume token when aggregator consume is ena
   }
 });
 
+test("non-atomic pow path with AGG true and turncheck false calls aggregator once", async () => {
+  const restoreGlobals = ensureGlobals();
+  const powModulePath = await buildPowModule();
+  const mod = await import(`${pathToFileURL(powModulePath).href}?v=${Date.now()}-non-atomic-agg-true`);
+
+  const payload = makeInnerPayload({ powcheck: true, atomic: false, turncheck: false });
+  payload.c.AGGREGATOR_POW_ATOMIC_CONSUME = true;
+  const freshHeaders = () => makeInnerHeaders(payload);
+
+  const originalFetch = globalThis.fetch;
+  let originCalls = 0;
+  let aggregatorCalls = 0;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (String(req.url) === SITEVERIFY_URL) {
+        aggregatorCalls += 1;
+        return new Response(JSON.stringify({ ok: true, reason: "ok", checks: {}, providers: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      originCalls += 1;
+      return new Response("ok", { status: 200 });
+    };
+
+    const pageRes = await mod.default.fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: { ...freshHeaders(), Accept: "text/html", "CF-Connecting-IP": "1.2.3.4" },
+      }),
+      {},
+      {}
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args);
+
+    const nonce = base64Url(crypto.randomBytes(16));
+    const witness = await buildMhgWitnessBundle({
+      ticketB64: args.ticketB64,
+      nonce,
+      pageBytes: payload.c.POW_PAGE_BYTES,
+      mixRounds: payload.c.POW_MIX_ROUNDS,
+    });
+
+    const commitRes = await mod.default.fetch(
+      new Request("https://example.com/__pow/commit", {
+        method: "POST",
+        headers: { ...freshHeaders(), "Content-Type": "application/json", "CF-Connecting-IP": "1.2.3.4" },
+        body: JSON.stringify({
+          ticketB64: args.ticketB64,
+          rootB64: witness.rootB64,
+          pathHash: args.pathHash,
+          nonce,
+        }),
+      }),
+      {},
+      {}
+    );
+    assert.equal(commitRes.status, 200);
+    const commitCookie = (commitRes.headers.get("set-cookie") || "").split(";")[0];
+
+    const challengeRes = await mod.default.fetch(
+      new Request("https://example.com/__pow/challenge", {
+        method: "POST",
+        headers: { ...freshHeaders(), "Content-Type": "application/json", Cookie: commitCookie },
+        body: JSON.stringify({}),
+      }),
+      {},
+      {}
+    );
+    assert.equal(challengeRes.status, 200);
+    let state = await challengeRes.json();
+
+    while (state.done === false) {
+      const opens = state.indices.map((idx, pos) =>
+        buildOpenEntryFromBundle({ bundle: witness, idx, seg: state.segs[pos] ?? 1 })
+      );
+      const openRes = await mod.default.fetch(
+        new Request("https://example.com/__pow/open", {
+          method: "POST",
+          headers: { ...freshHeaders(), "Content-Type": "application/json", Cookie: commitCookie },
+          body: JSON.stringify({ sid: state.sid, cursor: state.cursor, token: state.token, opens }),
+        }),
+        {},
+        {}
+      );
+      assert.equal(openRes.status, 200);
+      state = await openRes.json();
+    }
+
+    assert.equal(originCalls, 0);
+    assert.equal(aggregatorCalls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("non-atomic pow path with AGG false and turncheck false keeps aggregator at zero", async () => {
+  const restoreGlobals = ensureGlobals();
+  const powModulePath = await buildPowModule();
+  const mod = await import(`${pathToFileURL(powModulePath).href}?v=${Date.now()}-non-atomic-agg-false`);
+
+  const payload = makeInnerPayload({ powcheck: true, atomic: false, turncheck: false });
+  payload.c.AGGREGATOR_POW_ATOMIC_CONSUME = false;
+  const freshHeaders = () => makeInnerHeaders(payload);
+
+  const originalFetch = globalThis.fetch;
+  let originCalls = 0;
+  let aggregatorCalls = 0;
+  try {
+    globalThis.fetch = async (input, init) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      if (String(req.url) === SITEVERIFY_URL) {
+        aggregatorCalls += 1;
+        return new Response(JSON.stringify({ ok: true, reason: "ok", checks: {}, providers: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      originCalls += 1;
+      return new Response("ok", { status: 200 });
+    };
+
+    const pageRes = await mod.default.fetch(
+      new Request("https://example.com/protected", {
+        method: "GET",
+        headers: { ...freshHeaders(), Accept: "text/html", "CF-Connecting-IP": "1.2.3.4" },
+      }),
+      {},
+      {}
+    );
+    assert.equal(pageRes.status, 200);
+    const args = extractChallengeArgs(await pageRes.text());
+    assert.ok(args);
+
+    const nonce = base64Url(crypto.randomBytes(16));
+    const witness = await buildMhgWitnessBundle({
+      ticketB64: args.ticketB64,
+      nonce,
+      pageBytes: payload.c.POW_PAGE_BYTES,
+      mixRounds: payload.c.POW_MIX_ROUNDS,
+    });
+
+    const commitRes = await mod.default.fetch(
+      new Request("https://example.com/__pow/commit", {
+        method: "POST",
+        headers: { ...freshHeaders(), "Content-Type": "application/json", "CF-Connecting-IP": "1.2.3.4" },
+        body: JSON.stringify({
+          ticketB64: args.ticketB64,
+          rootB64: witness.rootB64,
+          pathHash: args.pathHash,
+          nonce,
+        }),
+      }),
+      {},
+      {}
+    );
+    assert.equal(commitRes.status, 200);
+    const commitCookie = (commitRes.headers.get("set-cookie") || "").split(";")[0];
+
+    const challengeRes = await mod.default.fetch(
+      new Request("https://example.com/__pow/challenge", {
+        method: "POST",
+        headers: { ...freshHeaders(), "Content-Type": "application/json", Cookie: commitCookie },
+        body: JSON.stringify({}),
+      }),
+      {},
+      {}
+    );
+    assert.equal(challengeRes.status, 200);
+    let state = await challengeRes.json();
+
+    while (state.done === false) {
+      const opens = state.indices.map((idx, pos) =>
+        buildOpenEntryFromBundle({ bundle: witness, idx, seg: state.segs[pos] ?? 1 })
+      );
+      const openRes = await mod.default.fetch(
+        new Request("https://example.com/__pow/open", {
+          method: "POST",
+          headers: { ...freshHeaders(), "Content-Type": "application/json", Cookie: commitCookie },
+          body: JSON.stringify({ sid: state.sid, cursor: state.cursor, token: state.token, opens }),
+        }),
+        {},
+        {}
+      );
+      assert.equal(openRes.status, 200);
+      state = await openRes.json();
+    }
+
+    assert.equal(aggregatorCalls, 0);
+    assert.equal(originCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
 test("pow-only atomic mode falls back to pow_required when aggregator consume is disabled", async () => {
   const restoreGlobals = ensureGlobals();
   const powModulePath = await buildPowModule();

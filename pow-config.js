@@ -401,9 +401,12 @@ const parseAtomicCookie = (value) => {
   const mode = parts[1];
   const captchaToken = parts[2] || "";
   const payload = parts[3] || "";
-  if (!captchaToken || !payload) return null;
-  if (mode === "t") return { captchaToken, ticketB64: payload, consumeToken: "" };
-  if (mode === "c") return { captchaToken, ticketB64: "", consumeToken: payload };
+  if (!payload) return null;
+  if (mode === "t") {
+    if (!captchaToken) return null;
+    return { captchaToken, ticketB64: payload, consumeToken: "" };
+  }
+  if (mode === "c") return { captchaToken: captchaToken || "", ticketB64: "", consumeToken: payload };
   return null;
 };
 
@@ -433,10 +436,12 @@ const extractAtomicAuth = (request, url, config) => {
   }
   if (!fromCookie) {
     const headerCaptcha = hTurn ? request.headers.get(hTurn) : "";
-    if (headerCaptcha) {
-      captchaToken = headerCaptcha;
-      ticketB64 = hTicket ? request.headers.get(hTicket) || "" : "";
-      consumeToken = hConsume ? request.headers.get(hConsume) || "" : "";
+    const headerTicket = hTicket ? request.headers.get(hTicket) : "";
+    const headerConsume = hConsume ? request.headers.get(hConsume) : "";
+    if (headerCaptcha || headerTicket || headerConsume) {
+      captchaToken = headerCaptcha || "";
+      ticketB64 = headerTicket || "";
+      consumeToken = headerConsume || "";
     } else {
       captchaToken = qTurn ? url.searchParams.get(qTurn) || "" : "";
       ticketB64 = qTicket ? url.searchParams.get(qTicket) || "" : "";
