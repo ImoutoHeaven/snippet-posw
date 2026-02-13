@@ -133,7 +133,7 @@ Each `CONFIG` entry looks like:
 | `POW_COMMIT_COOKIE` | `string` | `"__Host-pow_commit"` | Global commit cookie name. |
 | `POW_ESM_URL` | `string` | (repo-pinned) | ESM worker URL for browser PoW solve logic. |
 | `POW_GLUE_URL` | `string` | (repo-pinned) | ESM glue runtime URL for challenge orchestration. |
-| `SITEVERIFY_URL` | `string` | `""` | siteverify aggregator URL. |
+| `SITEVERIFY_URLS` | `string[]` | `[]` | Optional aggregator shard list; requests are deterministically routed by `ticketMac`. |
 | `SITEVERIFY_AUTH_KID` | `string` | `"v1"` | siteverify auth key id. |
 | `SITEVERIFY_AUTH_SECRET` | `string` | `""` | siteverify auth secret. |
 | `TURNSTILE_SITEKEY` | `string` | — | Turnstile site key. |
@@ -196,6 +196,7 @@ Subrequest matrix (API + business paths):
 ### Aggregator consume contract
 
 - `AGGREGATOR_POW_ATOMIC_CONSUME=true` allows pow-only atomic consume and preserves turnstile atomic behavior.
+- `SITEVERIFY_URLS` configures one or many aggregators: snippet hashes `ticketMac` and deterministically picks one shard.
 - Local PoW validity and consume-MAC verification remain in snippet runtime.
 - Aggregator receives only one-time consume contract material (`consumeKey`, `expireAt`) and enforces single-use semantics.
 

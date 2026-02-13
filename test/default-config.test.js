@@ -136,9 +136,28 @@ const FULL_STRATEGY = {
 
 test("normalizeConfig includes siteverify aggregator keys", () => {
   const cfg = __testNormalizeConfig({});
-  assert.equal(typeof cfg.SITEVERIFY_URL, "string");
+  assert.equal("SITEVERIFY_URL" in cfg, false);
+  assert.equal(Array.isArray(cfg.SITEVERIFY_URLS), true);
   assert.equal(typeof cfg.SITEVERIFY_AUTH_KID, "string");
   assert.equal(typeof cfg.SITEVERIFY_AUTH_SECRET, "string");
+});
+
+test("normalizeConfig keeps valid siteverify aggregator URL shards", () => {
+  const cfg = __testNormalizeConfig({
+    SITEVERIFY_URLS: [
+      "https://sv-1.example/siteverify",
+      "  https://sv-2.example/siteverify  ",
+      "",
+      null,
+      123,
+    ],
+  });
+
+  assert.equal("SITEVERIFY_URL" in cfg, false);
+  assert.deepEqual(cfg.SITEVERIFY_URLS, [
+    "https://sv-1.example/siteverify",
+    "https://sv-2.example/siteverify",
+  ]);
 });
 
 test("normalizeConfig exposes turnstile-only captcha surface", () => {

@@ -54,9 +54,14 @@ const ensureGlobals = () => {
 const sha256Hex = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const hmacSha256Hex = (secret, value) =>
   crypto.createHmac("sha256", secret).update(value).digest("hex");
+const pickShardUrl = (urls, ticketMac) => {
+  const digest = sha256Hex(`siteverify|${ticketMac}`);
+  const bucket = Number.parseInt(digest.slice(0, 8), 16);
+  return urls[bucket % urls.length];
+};
 
 const baseConfig = {
-  SITEVERIFY_URL: "https://sv.example/siteverify",
+  SITEVERIFY_URLS: ["https://sv.example/siteverify"],
   SITEVERIFY_AUTH_KID: "v1",
   SITEVERIFY_AUTH_SECRET: "siteverify-secret",
 };
@@ -108,7 +113,7 @@ test("client sends SV1 authorization and body hash headers", async () => {
     assert.equal(result.ok, true);
     assert.ok(capturedRequest, "captures outbound request");
     assert.equal(capturedRequest.method, "POST");
-    assert.equal(capturedRequest.url, baseConfig.SITEVERIFY_URL);
+    assert.equal(capturedRequest.url, baseConfig.SITEVERIFY_URLS[0]);
 
     const authHeader = capturedRequest.headers.get("authorization") || "";
     const bodyHashHeader = capturedRequest.headers.get("x-sv-body-sha256") || "";
@@ -134,7 +139,7 @@ test("client sends SV1 authorization and body hash headers", async () => {
     const canonical = [
       "SV1",
       "POST",
-      new URL(baseConfig.SITEVERIFY_URL).pathname,
+      new URL(baseConfig.SITEVERIFY_URLS[0]).pathname,
       authKv.kid,
       authKv.exp,
       authKv.nonce,
@@ -142,6 +147,112 @@ test("client sends SV1 authorization and body hash headers", async () => {
     ].join("\n");
 
     assert.equal(authKv.sig, hmacSha256Hex(baseConfig.SITEVERIFY_AUTH_SECRET, canonical));
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("client rejects legacy SITEVERIFY_URL-only config", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        reason: "ok",
+        checks: {},
+        providers: {},
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+
+  try {
+    const result = await verifyViaSiteverifyAggregator({
+      config: {
+        SITEVERIFY_URL: "https://legacy.example/siteverify",
+        SITEVERIFY_AUTH_KID: "v1",
+        SITEVERIFY_AUTH_SECRET: "siteverify-secret",
+      },
+      payload: basePayload,
+    });
+
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "invalid_aggregator_response",
+    });
+    assert.equal(fetchCalls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreGlobals();
+  }
+});
+
+test("client deterministically shards requests across siteverify aggregators", async () => {
+  const restoreGlobals = ensureGlobals();
+  const originalFetch = globalThis.fetch;
+  const shardUrls = [
+    "https://sv-1.example/siteverify",
+    "https://sv-2.example/siteverify",
+    "https://sv-3.example/siteverify",
+  ];
+  const observedUrls = [];
+
+  globalThis.fetch = async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    observedUrls.push(request.url);
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        reason: "ok",
+        checks: {},
+        providers: {},
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  };
+
+  try {
+    const config = {
+      SITEVERIFY_URLS: shardUrls,
+      SITEVERIFY_AUTH_KID: "v1",
+      SITEVERIFY_AUTH_SECRET: "siteverify-secret",
+    };
+
+    const ticketMacA = "ticket-mac-alpha";
+    const ticketMacB = "ticket-mac-beta";
+
+    const resultA1 = await verifyViaSiteverifyAggregator({
+      config,
+      payload: { ...basePayload, ticketMac: ticketMacA },
+    });
+    const resultA2 = await verifyViaSiteverifyAggregator({
+      config,
+      payload: { ...basePayload, ticketMac: ticketMacA },
+    });
+    const resultB = await verifyViaSiteverifyAggregator({
+      config,
+      payload: { ...basePayload, ticketMac: ticketMacB },
+    });
+
+    assert.equal(resultA1.ok, true);
+    assert.equal(resultA2.ok, true);
+    assert.equal(resultB.ok, true);
+    assert.deepEqual(observedUrls, [
+      pickShardUrl(shardUrls, ticketMacA),
+      pickShardUrl(shardUrls, ticketMacA),
+      pickShardUrl(shardUrls, ticketMacB),
+    ]);
   } finally {
     globalThis.fetch = originalFetch;
     restoreGlobals();

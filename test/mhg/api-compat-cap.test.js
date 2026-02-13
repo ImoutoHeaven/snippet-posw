@@ -182,7 +182,7 @@ const makeInnerPayload = ({ powcheck, atomic, turncheck = true }) => ({
     turncheck,
     TURNSTILE_SITEKEY: "turn-site",
     TURNSTILE_SECRET: "turn-secret",
-    SITEVERIFY_URL: "https://sv.example/siteverify",
+    SITEVERIFY_URLS: ["https://sv.example/siteverify"],
     SITEVERIFY_AUTH_KID: "v1",
     SITEVERIFY_AUTH_SECRET: "shared-secret",
     POW_VERSION: 3,

@@ -133,7 +133,7 @@ test("turnstile-required flow rejects malformed envelope before aggregator call"
       {
         turncheck: true,
         TURNSTILE_SECRET: "turn-secret",
-        SITEVERIFY_URL: "https://sv.example/siteverify",
+        SITEVERIFY_URLS: ["https://sv.example/siteverify"],
         SITEVERIFY_AUTH_KID: "v1",
         SITEVERIFY_AUTH_SECRET: "shared-secret",
       },
@@ -174,7 +174,7 @@ test("valid turnstile envelope reaches aggregator with turnstile payload", async
       {
         turncheck: true,
         TURNSTILE_SECRET: "turn-secret",
-        SITEVERIFY_URL: "https://sv.example/siteverify",
+        SITEVERIFY_URLS: ["https://sv.example/siteverify"],
         SITEVERIFY_AUTH_KID: "v1",
         SITEVERIFY_AUTH_SECRET: "shared-secret",
       },

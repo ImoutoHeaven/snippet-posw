@@ -59,7 +59,7 @@ const DEFAULTS = {
     "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@6a34eb1/esm/esm.js",
   POW_GLUE_URL:
     "https://cdn.jsdelivr.net/gh/ImoutoHeaven/snippet-posw@6a34eb1/glue.js",
-  SITEVERIFY_URL: "",
+  SITEVERIFY_URLS: [],
   SITEVERIFY_AUTH_KID: "v1",
   SITEVERIFY_AUTH_SECRET: "",
 };
@@ -210,6 +210,23 @@ const normalizeBoolean = (value, fallback) =>
 
 const normalizeString = (value, fallback) =>
   typeof value === "string" ? value : fallback;
+
+const normalizeStringArray = (value, fallback) => {
+  if (!Array.isArray(value)) {
+    return Array.isArray(fallback) ? [...fallback] : [];
+  }
+
+  const normalized = [];
+  const seen = new Set();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const trimmed = entry.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    normalized.push(trimmed);
+  }
+  return normalized;
+};
 
 const clampIntRange = (value, min, max) =>
   Math.min(max, Math.max(min, Math.floor(value)));
@@ -1009,7 +1026,8 @@ const buildTlsFingerprintHash = async (request) => {
 };
 
 const normalizeConfig = (baseConfig) => {
-  const merged = { ...DEFAULTS, ...(baseConfig || {}) };
+  const mergedRaw = { ...DEFAULTS, ...(baseConfig || {}) };
+  const { SITEVERIFY_URL: _legacySiteverifyUrl, ...merged } = mergedRaw;
   return {
     ...merged,
     powcheck: normalizeBoolean(merged.powcheck, DEFAULTS.powcheck),
@@ -1191,7 +1209,7 @@ const normalizeConfig = (baseConfig) => {
     POW_GLUE_URL: normalizeString(merged.POW_GLUE_URL, DEFAULTS.POW_GLUE_URL),
     TURNSTILE_SITEKEY: normalizeString(merged.TURNSTILE_SITEKEY, ""),
     TURNSTILE_SECRET: normalizeString(merged.TURNSTILE_SECRET, ""),
-    SITEVERIFY_URL: normalizeString(merged.SITEVERIFY_URL, DEFAULTS.SITEVERIFY_URL),
+    SITEVERIFY_URLS: normalizeStringArray(merged.SITEVERIFY_URLS, DEFAULTS.SITEVERIFY_URLS),
     SITEVERIFY_AUTH_KID: normalizeString(merged.SITEVERIFY_AUTH_KID, DEFAULTS.SITEVERIFY_AUTH_KID),
     SITEVERIFY_AUTH_SECRET: normalizeString(
       merged.SITEVERIFY_AUTH_SECRET,
