@@ -66,28 +66,9 @@ const DEFAULTS = {
   SITEVERIFY_AUTH_SECRET: "",
 };
 
-const compileRegexFromMatcher = (matcher) => {
-  if (!matcher || matcher.kind !== "re") return null;
-  const source = typeof matcher.source === "string" ? matcher.source : "";
-  const flags = typeof matcher.flags === "string" ? matcher.flags : "";
-  try {
-    return new RegExp(source, flags);
-  } catch {
-    return null;
-  }
-};
-
-const testRegexDeterministic = (regex, value) => {
-  if (!(regex instanceof RegExp)) return false;
-  regex.lastIndex = 0;
-  return regex.test(value);
-};
-
 const normalizeCompiledEntry = (entry) => ({
   host: entry.host || null,
   path: entry.path || null,
-  hostRegex: entry.hostRegex instanceof RegExp ? entry.hostRegex : compileRegexFromMatcher(entry.host),
-  pathRegex: entry.pathRegex instanceof RegExp ? entry.pathRegex : compileRegexFromMatcher(entry.path),
   hostType: entry.hostType,
   hostExact: entry.hostExact,
   hostLabels: entry.hostLabels,
@@ -749,48 +730,41 @@ const matchHostFast = (host, rule) => {
   if (!host || !rule) return false;
   if (rule.hostType === "exact") {
     if (typeof rule.hostExact === "string") return host === rule.hostExact;
-    if (rule.hostRegex) return testRegexDeterministic(rule.hostRegex, host);
-    return false;
   }
   if (rule.hostType === "wildcard") {
-    if (!Array.isArray(rule.hostLabels)) {
-      if (rule.hostRegex) return testRegexDeterministic(rule.hostRegex, host);
-      return false;
+    if (Array.isArray(rule.hostLabels)) {
+      const labels = host.split(".");
+      const expectedCount =
+        typeof rule.hostLabelCount === "number" ? rule.hostLabelCount : rule.hostLabels.length;
+      if (labels.length !== expectedCount) return false;
+      for (let i = 0; i < expectedCount; i++) {
+        const expected = rule.hostLabels[i];
+        if (expected === "*") continue;
+        if (labels[i] !== expected) return false;
+      }
+      return true;
     }
-    const labels = host.split(".");
-    const expectedCount =
-      typeof rule.hostLabelCount === "number" ? rule.hostLabelCount : rule.hostLabels.length;
-    if (labels.length !== expectedCount) return false;
-    for (let i = 0; i < expectedCount; i++) {
-      const expected = rule.hostLabels[i];
-      if (expected === "*") continue;
-      if (labels[i] !== expected) return false;
-    }
-    return true;
   }
-  if (rule.hostRegex) return testRegexDeterministic(rule.hostRegex, host);
-  return matchTextMatcher(rule.host, host, { defaultCase: "insensitive" });
+  return matchTextMatcher(rule.host, host, {
+    defaultCase: "insensitive",
+    globMode: "host",
+  });
 };
 
 const matchPathFast = (path, rule) => {
   if (!rule) return false;
   if (rule.pathType === "exact") {
     if (typeof rule.pathExact === "string") return path === rule.pathExact;
-    if (rule.pathRegex) return testRegexDeterministic(rule.pathRegex, path);
-    return false;
   }
   if (rule.pathType === "prefix") {
-    if (typeof rule.pathPrefix !== "string") {
-      if (rule.pathRegex) return testRegexDeterministic(rule.pathRegex, path);
-      return false;
+    if (typeof rule.pathPrefix === "string") {
+      if (rule.pathPrefix === "/") {
+        return path.startsWith("/");
+      }
+      return path === rule.pathPrefix || path.startsWith(`${rule.pathPrefix}/`);
     }
-    if (rule.pathPrefix === "/") {
-      return path.startsWith("/") || (rule.pathRegex ? testRegexDeterministic(rule.pathRegex, path) : false);
-    }
-    return path === rule.pathPrefix || path.startsWith(`${rule.pathPrefix}/`);
   }
-  if (rule.pathRegex) return testRegexDeterministic(rule.pathRegex, path);
-  return matchTextMatcher(rule.path, path, { defaultCase: "sensitive" });
+  return matchTextMatcher(rule.path, path, { defaultCase: "sensitive", globMode: "path" });
 };
 
 const buildTlsFingerprintHash = async (request) => {
@@ -1030,7 +1004,7 @@ const pickConfigWithId = (request, url, hostname, path) => {
     const rule = COMPILED_CONFIG[i];
     if (!rule) continue;
     if (!matchHostFast(host, rule)) continue;
-    if (rule.pathRegex || rule.pathType || rule.path) {
+    if (rule.pathType || rule.path) {
       if (!matchPathFast(requestPath, rule)) continue;
     }
     if (rule.when) {

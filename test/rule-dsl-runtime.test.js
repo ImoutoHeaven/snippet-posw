@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { compileConfigEntry } from "../lib/rule-engine/compile.js";
-import { evaluateWhen } from "../lib/rule-engine/runtime.js";
+import { evaluateWhen, matchTextMatcher } from "../lib/rule-engine/runtime.js";
 
 globalThis.__COMPILED_CONFIG__ = [];
 const powConfig = await import("../pow-config.js");
@@ -106,21 +106,18 @@ test("uses explicit ua/path semantics from IR", () => {
   assert.equal(evaluateWhen(pathCond, { path: "/api" }), false);
 });
 
-test("compiler normalizes ua eq into contains semantics in IR", () => {
+test("ua.eq remains strict literal and treats * literally at runtime", () => {
   const compiled = compileConfigEntry({
     host: { eq: "example.com" },
-    when: { ua: { eq: "bot" } },
+    when: { ua: { eq: "A*B" } },
     config: {},
   });
 
   assert.equal(compiled.when.kind, "atom");
   assert.equal(compiled.when.field, "ua");
-  assert.deepEqual(compiled.when.matcher, {
-    kind: "glob",
-    pattern: "*bot*",
-    case: "insensitive",
-  });
-  assert.equal(evaluateWhen(compiled.when, { ua: "SuperBot/1.0" }), true);
+  assert.deepEqual(compiled.when.matcher, { kind: "eq", value: "A*B" });
+  assert.equal(evaluateWhen(compiled.when, { ua: "A*B" }), true);
+  assert.equal(evaluateWhen(compiled.when, { ua: "A123B" }), false);
 });
 
 test("pow-config uses first-match-wins with runtime IR", () => {
@@ -345,6 +342,65 @@ test("pow-config checks host matcher fallback when metadata is absent", () => {
   }
 });
 
+test("host embedded star does not cross labels", () => {
+  const matcher = { kind: "glob", pattern: "api*.example.com", case: "insensitive" };
+  assert.equal(
+    matchTextMatcher(matcher, "api1.example.com", {
+      defaultCase: "insensitive",
+      globMode: "host",
+    }),
+    true,
+  );
+  assert.equal(
+    matchTextMatcher(matcher, "api.foo.example.com", {
+      defaultCase: "insensitive",
+      globMode: "host",
+    }),
+    false,
+  );
+});
+
+test("pow-config host fallback respects label boundaries", () => {
+  const { __test } = powConfig;
+  const compiled = [
+    {
+      host: { kind: "glob", pattern: "api*.example.com", case: "insensitive" },
+      hostType: null,
+      hostRegex: null,
+      path: null,
+      pathType: null,
+      pathRegex: null,
+      when: null,
+      config: { id: "host-embedded-star" },
+    },
+  ];
+
+  const restore = __test.setCompiledConfigForTest(compiled);
+  try {
+    const matchSameLabel = new Request("https://api1.example.com/");
+    const matchSameLabelUrl = new URL(matchSameLabel.url);
+    const selectedSameLabel = __test.pickConfigWithId(
+      matchSameLabel,
+      matchSameLabelUrl,
+      matchSameLabelUrl.hostname,
+      matchSameLabelUrl.pathname,
+    );
+    assert.equal(selectedSameLabel?.config?.id, "host-embedded-star");
+
+    const crossLabel = new Request("https://api.foo.example.com/");
+    const crossLabelUrl = new URL(crossLabel.url);
+    const selectedCrossLabel = __test.pickConfigWithId(
+      crossLabel,
+      crossLabelUrl,
+      crossLabelUrl.hostname,
+      crossLabelUrl.pathname,
+    );
+    assert.equal(selectedCrossLabel, null);
+  } finally {
+    restore();
+  }
+});
+
 test("pow-config host regex fallback with g flag is stable across repeated picks", () => {
   const { __test } = powConfig;
   const compiled = [
@@ -402,6 +458,132 @@ test("pow-config path regex fallback with y flag is stable across repeated picks
     assert.equal(second?.config?.id, "path-regex-y");
   } finally {
     restore();
+  }
+});
+
+test("pow-config ignores legacy hostRegex/pathRegex and uses matcher IR", () => {
+  const { __test } = powConfig;
+  const compiled = [
+    {
+      host: { kind: "eq", value: "example.com" },
+      hostType: null,
+      hostRegex: /^does-not-match$/,
+      path: { kind: "eq", value: "/match", case: "sensitive" },
+      pathType: null,
+      pathRegex: /^\/never-match$/,
+      when: null,
+      config: { id: "matcher-ir-authoritative" },
+    },
+  ];
+
+  const restore = __test.setCompiledConfigForTest(compiled);
+  try {
+    const request = new Request("https://example.com/match");
+    const url = new URL(request.url);
+    const selected = __test.pickConfigWithId(request, url, url.hostname, url.pathname);
+    assert.equal(selected?.config?.id, "matcher-ir-authoritative");
+  } finally {
+    restore();
+  }
+});
+
+test("path glob single-star does not cross slash", () => {
+  const matcher = { kind: "glob", pattern: "/foo/*", case: "sensitive" };
+  assert.equal(
+    matchTextMatcher(matcher, "/foo/a", { defaultCase: "sensitive", globMode: "path" }),
+    true,
+  );
+  assert.equal(
+    matchTextMatcher(matcher, "/foo/a/b", { defaultCase: "sensitive", globMode: "path" }),
+    false,
+  );
+});
+
+test("glob cache key isolates text and path modes", () => {
+  const matcher = { kind: "glob", pattern: "/foo/*", case: "sensitive" };
+  assert.equal(
+    matchTextMatcher(matcher, "/foo/a/b", { defaultCase: "sensitive", globMode: "text" }),
+    true,
+  );
+  assert.equal(
+    matchTextMatcher(matcher, "/foo/a/b", { defaultCase: "sensitive", globMode: "path" }),
+    false,
+  );
+});
+
+test("pow-config path glob fallback respects path glob boundaries", () => {
+  const { __test } = powConfig;
+  const compiled = [
+    {
+      host: { kind: "eq", value: "example.com" },
+      hostType: "exact",
+      hostExact: "example.com",
+      path: { kind: "glob", pattern: "/foo/*", case: "sensitive" },
+      pathType: null,
+      pathRegex: null,
+      when: null,
+      config: { id: "path-glob-fallback" },
+    },
+  ];
+
+  const restore = __test.setCompiledConfigForTest(compiled);
+  try {
+    const matchSingle = new Request("https://example.com/foo/a");
+    const matchSingleUrl = new URL(matchSingle.url);
+    const selectedSingle = __test.pickConfigWithId(
+      matchSingle,
+      matchSingleUrl,
+      matchSingleUrl.hostname,
+      matchSingleUrl.pathname,
+    );
+    assert.equal(selectedSingle?.config?.id, "path-glob-fallback");
+
+    const matchNested = new Request("https://example.com/foo/a/b");
+    const matchNestedUrl = new URL(matchNested.url);
+    const selectedNested = __test.pickConfigWithId(
+      matchNested,
+      matchNestedUrl,
+      matchNestedUrl.hostname,
+      matchNestedUrl.pathname,
+    );
+    assert.equal(selectedNested, null);
+  } finally {
+    restore();
+  }
+});
+
+test("pow-config /api/** parity between metadata prefix and fallback glob", () => {
+  const { __test } = powConfig;
+
+  const compileRule = (pathType) => ({
+    host: { kind: "eq", value: "example.com" },
+    hostType: "exact",
+    hostExact: "example.com",
+    path: { kind: "glob", pattern: "/api/**", case: "sensitive" },
+    pathType,
+    pathPrefix: pathType === "prefix" ? "/api" : null,
+    when: null,
+    config: { id: pathType === "prefix" ? "meta" : "fallback" },
+  });
+
+  const expectMatch = (rule, path) => {
+    const restore = __test.setCompiledConfigForTest([rule]);
+    try {
+      const request = new Request(`https://example.com${path}`);
+      const url = new URL(request.url);
+      const selected = __test.pickConfigWithId(request, url, url.hostname, url.pathname);
+      assert.equal(selected?.config?.id !== undefined, true);
+    } finally {
+      restore();
+    }
+  };
+
+  const metaRule = compileRule("prefix");
+  const fallbackRule = compileRule(null);
+
+  for (const path of ["/api", "/api/x"]) {
+    expectMatch(metaRule, path);
+    expectMatch(fallbackRule, path);
   }
 });
 

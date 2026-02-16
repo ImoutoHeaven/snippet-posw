@@ -145,3 +145,15 @@ test("compileConfigEntry rejects invalid regex in non-map when atoms", () => {
     /CONFIG\.when\.path.*invalid regex/i,
   );
 });
+
+test("ua.eq remains eq in IR and treats * literally", () => {
+  const compiled = compileConfigEntry({
+    host: { eq: "example.com" },
+    when: { ua: { eq: "A*B" } },
+    config: {},
+  });
+
+  assert.equal(compiled.when.kind, "atom");
+  assert.equal(compiled.when.field, "ua");
+  assert.deepEqual(compiled.when.matcher, { kind: "eq", value: "A*B" });
+});

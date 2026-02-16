@@ -94,6 +94,16 @@ Text matchers (`host`, `path`, `ua`, `country`, `asn`, `method`, `header.*`, `co
 - `{ re: "^expr$", flags: "i" }`
 - `{ exists: true|false }` (only for `header.*`, `cookie.*`, and `query.*`)
 
+Matcher operator semantics are strict:
+
+- `eq` is exact literal equality (for example, `ua: { eq: "A*B" }` matches only `A*B`).
+- `glob` is wildcard matching with field-specific boundaries:
+  - `host.glob`: `*` matches any chars except `.` (does not cross DNS labels).
+  - `path.glob`: `*` matches any chars except `/` (single segment), `**` can cross `/`.
+  - `path.glob` trailing `/**` also matches the prefix itself (zero extra segments), so `/api/**` matches both `/api` and `/api/x`.
+  - generic text glob (for non-host/non-path text fields): `*` can match across any chars.
+- `re` is regular expression matching.
+
 IP matchers (`ip`):
 
 - `{ eq: "203.0.113.4" }`
@@ -108,8 +118,8 @@ Logic matchers in `when`:
 
 | Field | Type | Description |
 |---|---|---|
-| `host` | `matcher object` | Required text matcher. `glob` supports `*`; use `eq` for exact host. |
-| `path` | `matcher object` | Optional text matcher; commonly `{ glob: "/prefix/**" }` or `{ eq: "/exact" }`. |
+| `host` | `matcher object` | Required text matcher. For `glob`, `*` does not cross `.`; use `eq` for exact host. |
+| `path` | `matcher object` | Optional text matcher. For `glob`, `*` does not cross `/`, `**` can cross `/`, and trailing `/**` also matches the prefix itself. |
 | `when` | `condition object` | Optional boolean logic over matcher objects for request attributes. |
 
 ### `config` keys (all supported)
