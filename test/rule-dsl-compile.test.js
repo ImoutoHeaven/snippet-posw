@@ -146,6 +146,40 @@ test("compileConfigEntry rejects invalid regex in non-map when atoms", () => {
   );
 });
 
+test("compileConfigEntry rejects invalid path glob syntax", () => {
+  assert.throws(
+    () =>
+      compileConfigEntry({
+        host: { eq: "example.com" },
+        path: { glob: "/foo/**bar" },
+        config: {},
+      }),
+    /CONFIG\.path.*invalid path glob.*standalone segment/i,
+  );
+
+  assert.throws(
+    () =>
+      compileConfigEntry({
+        host: { eq: "example.com" },
+        path: { glob: "/foo/***" },
+        config: {},
+      }),
+    /CONFIG\.path.*invalid path glob/i,
+  );
+});
+
+test("compileConfigEntry rejects invalid when.path glob syntax", () => {
+  assert.throws(
+    () =>
+      compileConfigEntry({
+        host: { eq: "example.com" },
+        when: { path: { glob: "/foo/a**b" } },
+        config: {},
+      }),
+    /CONFIG\.when\.path.*invalid path glob/i,
+  );
+});
+
 test("ua.eq remains eq in IR and treats * literally", () => {
   const compiled = compileConfigEntry({
     host: { eq: "example.com" },

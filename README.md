@@ -99,8 +99,11 @@ Matcher operator semantics are strict:
 - `eq` is exact literal equality (for example, `ua: { eq: "A*B" }` matches only `A*B`).
 - `glob` is wildcard matching with field-specific boundaries:
   - `host.glob`: `*` matches any chars except `.` (does not cross DNS labels).
-  - `path.glob`: `*` matches any chars except `/` (single segment), `**` can cross `/`.
-  - `path.glob` trailing `/**` also matches the prefix itself (zero extra segments), so `/api/**` matches both `/api` and `/api/x`.
+  - `path.glob`: `*` matches within one segment; `**` matches zero or more full directory segments.
+  - `path.glob`: `**` is valid only as a standalone segment (for example: `/api/**`, `/**/api`, `/a/**/b`).
+  - `path.glob`: invalid forms are rejected (`a**b`, `***`, `**a`, `a**`).
+  - `path.glob`: invalid syntax is rejected at config compile time; malformed runtime IR fails closed (no match).
+  - `path.glob` trailing `/**` matches zero extra segments, so `/api/**` matches both `/api` and `/api/x`.
   - generic text glob (for non-host/non-path text fields): `*` can match across any chars.
 - `re` is regular expression matching.
 
@@ -119,7 +122,7 @@ Logic matchers in `when`:
 | Field | Type | Description |
 |---|---|---|
 | `host` | `matcher object` | Required text matcher. For `glob`, `*` does not cross `.`; use `eq` for exact host. |
-| `path` | `matcher object` | Optional text matcher. For `glob`, `*` does not cross `/`, `**` can cross `/`, and trailing `/**` also matches the prefix itself. |
+| `path` | `matcher object` | Optional text matcher. For `glob`, `*` stays within one segment, `**` matches zero or more full directory segments only when used as a standalone segment, and trailing `/**` also matches the prefix itself. |
 | `when` | `condition object` | Optional boolean logic over matcher objects for request attributes. |
 
 ### `config` keys (all supported)

@@ -102,6 +102,17 @@ test("evaluateWhen path trailing globstar matches prefix and descendants", () =>
   assert.equal(evaluateWhen(condition, { path: "/api/x" }), true);
 });
 
+test("evaluateWhen path glob /**/api matches root-level and nested api", () => {
+  const condition = {
+    kind: "atom",
+    field: "path",
+    matcher: { kind: "glob", pattern: "/**/api", case: "sensitive" },
+  };
+
+  assert.equal(evaluateWhen(condition, { path: "/api" }), true);
+  assert.equal(evaluateWhen(condition, { path: "/v1/api" }), true);
+});
+
 test("matchIpMatcher supports ipv4 and ipv6 cidr", () => {
   assert.equal(typeof matchIpMatcher, "function");
   assert.equal(matchIpMatcher({ kind: "cidr", value: "192.168.1.0/24" }, "192.168.1.12"), true);

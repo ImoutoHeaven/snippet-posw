@@ -499,6 +499,26 @@ test("path glob single-star does not cross slash", () => {
   );
 });
 
+test("path glob globstar segment matches root-level and nested targets", () => {
+  const matcher = { kind: "glob", pattern: "/**/api", case: "sensitive" };
+  assert.equal(
+    matchTextMatcher(matcher, "/api", { defaultCase: "sensitive", globMode: "path" }),
+    true,
+  );
+  assert.equal(
+    matchTextMatcher(matcher, "/v1/api", { defaultCase: "sensitive", globMode: "path" }),
+    true,
+  );
+});
+
+test("runtime fails closed for invalid path glob IR", () => {
+  const matcher = { kind: "glob", pattern: "/foo/**bar", case: "sensitive" };
+  assert.equal(
+    matchTextMatcher(matcher, "/foo/bar", { defaultCase: "sensitive", globMode: "path" }),
+    false,
+  );
+});
+
 test("glob cache key isolates text and path modes", () => {
   const matcher = { kind: "glob", pattern: "/foo/*", case: "sensitive" };
   assert.equal(

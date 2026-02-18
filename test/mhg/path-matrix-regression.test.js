@@ -185,9 +185,11 @@ export default {
 
 const buildConfigModule = async (secret = CONFIG_SECRET, overrides = {}) => {
   const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
-  const [source, runtimeSource] = await Promise.all([
+  const [source, runtimeSource, pathGlobSource, lruCacheSource] = await Promise.all([
     readFile(join(repoRoot, "pow-config.js"), "utf8"),
     readFile(join(repoRoot, "lib", "rule-engine", "runtime.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "rule-engine", "path-glob.js"), "utf8"),
+    readFile(join(repoRoot, "lib", "rule-engine", "lru-cache.js"), "utf8"),
   ]);
   const compiledConfig = JSON.stringify([
     {
@@ -242,6 +244,8 @@ const buildConfigModule = async (secret = CONFIG_SECRET, overrides = {}) => {
   const tmpDir = await mkdtemp(join(tmpdir(), "pow-config-matrix-"));
   await mkdir(join(tmpDir, "lib", "rule-engine"), { recursive: true });
   await writeFile(join(tmpDir, "lib", "rule-engine", "runtime.js"), runtimeSource);
+  await writeFile(join(tmpDir, "lib", "rule-engine", "path-glob.js"), pathGlobSource);
+  await writeFile(join(tmpDir, "lib", "rule-engine", "lru-cache.js"), lruCacheSource);
   const tmpPath = join(tmpDir, "pow-config.js");
   await writeFile(tmpPath, withSecret);
   return tmpPath;

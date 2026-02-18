@@ -93,6 +93,38 @@ test("buildCompiledConfig rejects invalid path matcher", async () => {
   await assert.rejects(() => buildCompiledConfig(filePath), /path.*exists.*not allowed/i);
 });
 
+test("buildCompiledConfig rejects invalid path glob syntax", async () => {
+  const pathGlobPath = await writeTempConfig(`
+ const CONFIG = [
+   { host: { eq: "example.com" }, path: { glob: "/foo/**bar" }, config: {} },
+ ];
+ `);
+  await assert.rejects(
+    () => buildCompiledConfig(pathGlobPath),
+    /CONFIG\.path.*invalid path glob.*standalone segment/i,
+  );
+
+  const tripleStarPath = await writeTempConfig(`
+ const CONFIG = [
+   { host: { eq: "example.com" }, path: { glob: "/foo/***" }, config: {} },
+ ];
+ `);
+  await assert.rejects(
+    () => buildCompiledConfig(tripleStarPath),
+    /CONFIG\.path.*invalid path glob/i,
+  );
+
+  const whenPathGlobPath = await writeTempConfig(`
+ const CONFIG = [
+   { host: { eq: "example.com" }, when: { path: { glob: "/foo/a**b" } }, config: {} },
+ ];
+ `);
+  await assert.rejects(
+    () => buildCompiledConfig(whenPathGlobPath),
+    /CONFIG\.when\.path.*invalid path glob/i,
+  );
+});
+
 test("buildCompiledConfig works without structuredClone", async () => {
   const original = globalThis.structuredClone;
   try {
